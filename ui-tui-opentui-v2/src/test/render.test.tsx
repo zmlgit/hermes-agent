@@ -121,6 +121,28 @@ describe('App render (Phase 1, themed)', () => {
     expect(frame).toContain('(2 lines)') // output line count (collapsed)
   })
 
+  test('a settled reasoning part collapses to a one-line "Thought: <title>" header (item 6)', async () => {
+    const store = createSessionStore()
+    store.apply({ type: 'gateway.ready' })
+    store.apply({ type: 'message.start' })
+    store.apply({ type: 'reasoning.delta', payload: { text: '**Weighing options**\n\nthe hidden body text here' } })
+    store.apply({ type: 'message.delta', payload: { text: 'Answer.' } })
+    store.apply({ type: 'message.complete' })
+
+    const frame = await captureFrame(
+      () => (
+        <ThemeProvider theme={() => store.state.theme}>
+          <App store={store} />
+        </ThemeProvider>
+      ),
+      { until: 'Thought', width: 72, height: 16 }
+    )
+
+    expect(frame).toContain('Thought') // settled → collapsed header label
+    expect(frame).toContain('Weighing options') // the **bold** title is surfaced
+    expect(frame).not.toContain('hidden body text') // collapsed → body not shown
+  })
+
   test('an approval prompt replaces the composer (blocked) and renders the options', async () => {
     const store = createSessionStore()
     store.apply({ type: 'gateway.ready' })

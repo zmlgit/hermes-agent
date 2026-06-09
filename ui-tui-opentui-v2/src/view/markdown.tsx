@@ -51,12 +51,13 @@ function syntaxStyleFor(theme: Theme): SyntaxStyle {
   return style
 }
 
-export function Markdown(props: { text: string; streaming?: boolean }) {
+export function Markdown(props: { text: string; streaming?: boolean; fg?: string }) {
   const theme = useTheme()
   // opencode's v2 text path (session-v2.tsx AssistantText): the markdown engine via
   // <code filetype="markdown" streaming>. `drawUnstyledText={false}` avoids the
   // raw→styled flash per delta (the streaming flicker); `streaming` re-tokenizes
-  // incrementally rather than reparsing the whole buffer each repaint.
+  // incrementally rather than reparsing the whole buffer each repaint. `fg`
+  // overrides the base text color (e.g. muted for reasoning bodies — item 6).
   return (
     <code
       filetype="markdown"
@@ -65,7 +66,7 @@ export function Markdown(props: { text: string; streaming?: boolean }) {
       streaming={props.streaming ?? false}
       drawUnstyledText={false}
       conceal
-      fg={theme().color.text}
+      fg={props.fg ?? theme().color.text}
     />
   )
 }

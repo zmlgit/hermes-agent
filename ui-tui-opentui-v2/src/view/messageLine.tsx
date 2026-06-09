@@ -12,6 +12,7 @@ import { For, Match, Show, Switch } from 'solid-js'
 
 import type { Message } from '../logic/store.ts'
 import { Markdown } from './markdown.tsx'
+import { ReasoningPart } from './reasoningPart.tsx'
 import { useTheme } from './theme.tsx'
 import { ToolPart } from './toolPart.tsx'
 
@@ -59,11 +60,7 @@ export function MessageLine(props: { message: Message }) {
               <Switch>
                 <Match when={part.type === 'tool' && part}>{tool => <ToolPart part={tool()} />}</Match>
                 <Match when={part.type === 'reasoning' && part}>
-                  {r => (
-                    <text>
-                      <span style={{ fg: theme().color.muted }}>{r().text}</span>
-                    </text>
-                  )}
+                  {r => <ReasoningPart text={r().text} streaming={m().streaming ?? false} />}
                 </Match>
                 <Match when={part.type === 'text' && part}>
                   {t => <Markdown text={t().text} streaming={m().streaming ?? false} />}
