@@ -2199,15 +2199,33 @@ def delegate_task(
         # tools/async_delegation.py). Batch async is intentionally NOT
         # supported in v1 — the rejection is handled before we get here.
         if background:
-            from tools.async_delegation import (
-                dispatch_async_delegation,
-                _DEFAULT_MAX_ASYNC_CHILDREN as _ASYNC_DEFAULT,  # noqa: F401
-            )
+            from tools.async_delegation import dispatch_async_delegation
             from tools.approval import get_current_session_key
 
             # Capture the gateway routing key on THIS (parent) thread — the
             # daemon worker won't carry the session contextvar.
             _session_key = get_current_session_key(default="")
+
+            # Detach the child from the parent's interrupt-propagation list.
+            # _build_child_agent registered it there (correct for sync
+            # children, which block the parent's turn), but a BACKGROUND
+            # child must survive parent-turn interrupts (Ctrl+C, mid-turn
+            # steering), cache evicts (release_clients), and session close
+            # (/new) — otherwise the detached subagent dies with whatever
+            # the parent was doing when it was dispatched. Its lifecycle is
+            # owned by the async-delegation registry (interrupt_fn below),
+            # and _run_single_child's finally block closes its resources
+            # when it finishes.
+            if hasattr(parent_agent, "_active_children"):
+                try:
+                    _ac_lock = getattr(parent_agent, "_active_children_lock", None)
+                    if _ac_lock:
+                        with _ac_lock:
+                            parent_agent._active_children.remove(child)
+                    else:
+                        parent_agent._active_children.remove(child)
+                except ValueError:
+                    pass
 
             def _async_runner(_child=child, _goal=_t["goal"]):
                 return _run_single_child(0, _goal, _child, parent_agent)

@@ -1577,7 +1577,6 @@ def _format_async_delegation(evt: dict) -> str:
         if summary:
             lines.append("Partial output:")
             lines.append(summary)
-    lines.append("]")
     return "\n".join(lines)
 
 

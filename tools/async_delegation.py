@@ -154,18 +154,6 @@ def dispatch_async_delegation(
         ``{"status": "dispatched", "delegation_id": ...}`` on success, or
         ``{"status": "rejected", "error": ...}`` when at capacity.
     """
-    if active_count() >= max_async_children:
-        return {
-            "status": "rejected",
-            "error": (
-                f"Async delegation capacity reached ({max_async_children} "
-                f"running). Wait for one to finish (its result will re-enter "
-                f"the chat), or run this task synchronously "
-                f"(background=false). Raise delegation.max_async_children in "
-                f"config.yaml to allow more concurrent background subagents."
-            ),
-        }
-
     delegation_id = _new_delegation_id()
     dispatched_at = time.time()
     record: Dict[str, Any] = {
@@ -181,7 +169,24 @@ def dispatch_async_delegation(
         "completed_at": None,
         "interrupt_fn": interrupt_fn,
     }
+    # Capacity check and record insert under ONE lock hold — checking
+    # active_count() separately would let two concurrent dispatches (e.g.
+    # from different gateway sessions) both pass the check and exceed the cap.
     with _records_lock:
+        running = sum(
+            1 for r in _records.values() if r.get("status") == "running"
+        )
+        if running >= max_async_children:
+            return {
+                "status": "rejected",
+                "error": (
+                    f"Async delegation capacity reached ({max_async_children} "
+                    f"running). Wait for one to finish (its result will re-enter "
+                    f"the chat), or run this task synchronously "
+                    f"(background=false). Raise delegation.max_async_children in "
+                    f"config.yaml to allow more concurrent background subagents."
+                ),
+            }
         _records[delegation_id] = record
 
     executor = _get_executor(max_async_children)

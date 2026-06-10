@@ -274,6 +274,83 @@ def test_delegate_task_background_rejects_batch(monkeypatch):
     assert "single-task only" in parsed["error"]
 
 
+def test_delegate_task_background_detaches_child_from_parent(monkeypatch):
+    """A background child must NOT remain in parent._active_children —
+    otherwise parent-turn interrupts / cache evicts / session close would
+    kill the detached subagent mid-run."""
+    from unittest.mock import MagicMock, patch
+    import tools.delegate_tool as dt
+
+    parent = MagicMock()
+    parent._delegate_depth = 0
+    parent.session_id = "sess"
+    parent._active_children = []
+    parent._active_children_lock = threading.Lock()
+    fake_child = MagicMock()
+    fake_child._delegate_role = "leaf"
+    fake_child._subagent_id = "s1"
+
+    gate = threading.Event()
+
+    def slow_child(task_index, goal, child=None, parent_agent=None, **kw):
+        gate.wait(timeout=5)
+        return {"task_index": 0, "status": "completed", "summary": "ok"}
+
+    def build_and_register(**kw):
+        # Mirror what the real _build_child_agent does: register the child
+        # for interrupt propagation.
+        parent._active_children.append(fake_child)
+        return fake_child
+
+    creds = {
+        "model": "m", "provider": None, "base_url": None, "api_key": None,
+        "api_mode": None, "command": None, "args": None,
+    }
+    with patch.object(dt, "_build_child_agent", side_effect=build_and_register), \
+         patch.object(dt, "_run_single_child", side_effect=slow_child), \
+         patch.object(dt, "_resolve_delegation_credentials", return_value=creds):
+        out = dt.delegate_task(goal="bg task", background=True, parent_agent=parent)
+
+    import json
+    assert json.loads(out)["status"] == "dispatched"
+    # Child detached immediately at dispatch, while it is still running.
+    assert fake_child not in parent._active_children
+    gate.set()
+    assert _drain_one() is not None
+
+
+def test_concurrent_dispatch_respects_capacity():
+    """Two threads racing dispatch with cap=1 must yield exactly one accept
+    (capacity check and record insert are atomic under the records lock)."""
+    gate = threading.Event()
+
+    def blocker():
+        gate.wait(timeout=5)
+        return {"status": "completed", "summary": "x"}
+
+    results = []
+    barrier = threading.Barrier(2)
+
+    def racer():
+        barrier.wait(timeout=5)
+        results.append(
+            ad.dispatch_async_delegation(
+                goal="race", context=None, toolsets=None, role="leaf",
+                model="m", session_key="", runner=blocker,
+                max_async_children=1,
+            )
+        )
+
+    threads = [threading.Thread(target=racer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    statuses = sorted(r["status"] for r in results)
+    assert statuses == ["dispatched", "rejected"]
+    gate.set()
+
+
 # ---------------------------------------------------------------------------
 # Gateway routing: session_key -> platform/chat_id, rich formatting, injection
 # ---------------------------------------------------------------------------
