@@ -296,6 +296,66 @@ class GatewayKanbanWatchersMixin:
             # Reset stale counter — something real happened.
             self._orch_cb_stale_counts[slug] = 0
 
+            # Rescue orphaned children: if a task is blocked and has
+            # children stuck in 'todo' (because parent isn't 'done'),
+            # detach them so they become independent tasks. This prevents
+            # deadlocks: tester blocks → creates fix task as child →
+            # fix task stuck because blocked parent never reaches 'done'.
+            # Try re-parenting to grandparent first (preserves context);
+            # if no grandparent or grandparent not done, just detach.
+            try:
+                conn = _kb.connect(board=slug)
+                try:
+                    blocked_tasks = _kb.list_tasks(conn, status="blocked") or []
+                    for bt in blocked_tasks:
+                        # Find todo children of this blocked task.
+                        orphan_rows = conn.execute(
+                            "SELECT t.id FROM tasks t "
+                            "JOIN task_edges e ON e.child_id = t.id "
+                            "WHERE e.parent_id = ? AND t.status = 'todo'",
+                            (bt.id,),
+                        ).fetchall()
+                        for orow in orphan_rows:
+                            orphan_id = orow[0]
+                            # Try re-parenting to grandparent (done tasks only).
+                            gp_row = conn.execute(
+                                "SELECT e2.parent_id, t2.status FROM task_edges e "
+                                "JOIN task_edges e2 ON e2.child_id = e.parent_id "
+                                "JOIN tasks t2 ON t2.id = e2.parent_id "
+                                "WHERE e.child_id = ?",
+                                (orphan_id,),
+                            ).fetchone()
+                            if gp_row and gp_row[0] and gp_row[1] == "done":
+                                # Grandparent exists and is done — re-parent.
+                                conn.execute(
+                                    "DELETE FROM task_edges WHERE parent_id=? AND child_id=?",
+                                    (bt.id, orphan_id),
+                                )
+                                conn.execute(
+                                    "INSERT OR IGNORE INTO task_edges(parent_id, child_id) VALUES(?,?)",
+                                    (gp_row[0], orphan_id),
+                                )
+                                logger.info(
+                                    "kanban epoch: re-parented orphan %s "
+                                    "from blocked %s to grandparent %s",
+                                    orphan_id, bt.id, gp_row[0],
+                                )
+                            else:
+                                # No suitable grandparent — detach entirely.
+                                conn.execute(
+                                    "DELETE FROM task_edges WHERE parent_id=? AND child_id=?",
+                                    (bt.id, orphan_id),
+                                )
+                                logger.info(
+                                    "kanban epoch: detached orphan %s from blocked %s",
+                                    orphan_id, bt.id,
+                                )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as rescue_exc:
+                logger.debug("kanban epoch: orphan rescue failed: %s", rescue_exc)
+
             # Epoch counter tracks active work on this board. Reset when:
             # 1. Board is idle (no running/ready/blocked = workflow finished)
             # 2. New terminal events arrived (fresh epoch budget per new event)
@@ -862,12 +922,12 @@ class GatewayKanbanWatchersMixin:
                             )
                 # ── Orchestrator epoch callback ────────────────────────
                 # Runs once per tick, independent of whether there were
-                # any deliveries. The callback scans boards directly.
+                # any deliveries. Fire-and-forget so it doesn't block
+                # the notifier loop (and thus user message delivery).
                 if kanban_cfg.get("orchestrator_notify"):
-                    try:
-                        await self._kanban_orchestrator_callback(deliveries, kanban_cfg)
-                    except Exception as epoch_exc:
-                        logger.warning("kanban epoch callback failed: %s", epoch_exc)
+                    asyncio.ensure_future(
+                        self._kanban_orchestrator_callback(deliveries, kanban_cfg)
+                    )
 
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
