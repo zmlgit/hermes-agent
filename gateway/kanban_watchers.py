@@ -361,30 +361,36 @@ class GatewayKanbanWatchersMixin:
                     summary_msg = "\n".join(summary_parts)
 
                     adapter = self.adapters.get(epoch_platform)
-                    if adapter:
-                        try:
-                            await adapter.send(chat_id=_chat_id, content=summary_msg)
-                        except Exception as send_exc:
-                            logger.debug("kanban epoch: summary send to %s failed: %s", _plat_str, send_exc)
 
-                    # Then inject into session for orchestrator to process.
+                    # Inject into session FIRST so the agent processes the
+                    # epoch while we prepare the user-facing message.
                     response_text = await self._handle_message(synthetic_event)
 
-                    # Send orchestrator's action summary.
+                    # Combine summary + agent response into ONE message to
+                    # minimize sends (avoid platform rate limits).
+                    summary_parts.append("")
                     if response_text:
-                        action_msg = f"📋 **处理结果:**\n{response_text[:500]}"
-                        if adapter:
-                            try:
-                                await adapter.send(chat_id=_chat_id, content=action_msg)
-                                logger.info(
-                                    "kanban epoch: response sent to %s/%s",
-                                    _plat_str, _chat_id,
-                                )
-                            except Exception as send_exc:
-                                logger.warning(
-                                    "kanban epoch: send to %s failed: %s",
-                                    _plat_str, send_exc,
-                                )
+                        summary_parts.append(f"📋 **处理结果:**\n{response_text[:500]}")
+
+                    combined_msg = "\n".join(summary_parts)
+
+                    if adapter:
+                        send_result = await adapter.send(
+                            chat_id=_chat_id, content=combined_msg,
+                        )
+                        # adapter.send() returns SendResult, does NOT raise.
+                        # Must check .success to detect failures.
+                        if send_result and getattr(send_result, "success", False):
+                            logger.info(
+                                "kanban epoch: sent to %s/%s (epoch %d/%d)",
+                                _plat_str, _chat_id, current_epoch, MAX_EPOCHS,
+                            )
+                        else:
+                            err = getattr(send_result, "error", "unknown") if send_result else "no result"
+                            logger.warning(
+                                "kanban epoch: send to %s/%s FAILED: %s",
+                                _plat_str, _chat_id, err,
+                            )
                 except Exception as orch_exc:
                     logger.warning(
                         "kanban orchestrator callback: failed for board %s: %s",
