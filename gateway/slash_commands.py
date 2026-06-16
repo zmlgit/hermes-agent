@@ -350,39 +350,61 @@ class GatewaySlashCommandsMixin:
         # success line ("Created t_abcd  (ready, assignee=...)"). If the user
         # passed --json we don't subscribe; they're clearly scripting and
         # can call /kanban notify-subscribe explicitly.
+        #
+        # Multi-platform: subscribe ALL connected adapters (not just the source
+        # platform) so the user receives notifications on every channel they've
+        # linked (feishu + weixin + etc.). The source platform gets the exact
+        # source chat_id; other platforms get their home channel.
         if is_create and output:
             m = re.search(r"Created\s+(t_[0-9a-f]+)\b", output)
             if m:
                 task_id = m.group(1)
                 try:
                     source = event.source
-                    platform = getattr(source, "platform", None)
-                    platform_str = (
-                        platform.value if hasattr(platform, "value") else str(platform or "")
+                    src_platform = getattr(source, "platform", None)
+                    src_platform_str = (
+                        src_platform.value if hasattr(src_platform, "value") else str(src_platform or "")
                     ).lower()
-                    chat_id = str(getattr(source, "chat_id", "") or "")
+                    src_chat_id = str(getattr(source, "chat_id", "") or "")
                     thread_id = str(getattr(source, "thread_id", "") or "")
                     user_id = str(getattr(source, "user_id", "") or "") or None
-                    if platform_str and chat_id:
-                        def _sub():
-                            from hermes_cli import kanban_db as _kb
-                            conn = _kb.connect(board=requested_board)
-                            try:
+                    notifier_profile = getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name()
+
+                    # Build the list of (platform, chat_id) pairs to subscribe.
+                    sub_targets: list[tuple[str, str]] = []
+                    # Source platform with exact chat_id first.
+                    if src_platform_str and src_chat_id:
+                        sub_targets.append((src_platform_str, src_chat_id))
+                    # All other connected adapters via their home channel.
+                    from gateway.config import Platform as _Plat
+                    for plat_obj, adapter in self.adapters.items():
+                        plat_s = getattr(plat_obj, "value", str(plat_obj)).lower()
+                        if plat_s == src_platform_str or plat_s in ("webhook", "api_server", "system"):
+                            continue
+                        home_chat = self.config.get_home_channel(plat_s)
+                        if home_chat:
+                            sub_targets.append((plat_s, home_chat))
+
+                    def _sub_all():
+                        from hermes_cli import kanban_db as _kb
+                        conn = _kb.connect(board=requested_board)
+                        try:
+                            for plat_s, chat_s in sub_targets:
                                 _kb.add_notify_sub(
                                     conn, task_id=task_id,
-                                    platform=platform_str, chat_id=chat_id,
-                                    thread_id=thread_id or None,
+                                    platform=plat_s, chat_id=chat_s,
+                                    thread_id=thread_id or None if plat_s == src_platform_str else None,
                                     user_id=user_id,
-                                    notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
+                                    notifier_profile=notifier_profile,
                                 )
-                            finally:
-                                conn.close()
-                        await asyncio.to_thread(_sub)
-                        output = (
-                            output.rstrip()
-                            + "\n"
-                            + t("gateway.kanban.subscribed_suffix", task_id=task_id)
-                        )
+                        finally:
+                            conn.close()
+                    await asyncio.to_thread(_sub_all)
+                    output = (
+                        output.rstrip()
+                        + "\n"
+                        + t("gateway.kanban.subscribed_suffix", task_id=task_id)
+                    )
                 except Exception as exc:
                     logger.warning("kanban create auto-subscribe failed: %s", exc)
 

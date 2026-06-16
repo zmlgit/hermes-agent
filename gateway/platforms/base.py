@@ -1473,6 +1473,22 @@ class MessageEvent:
     # completion notifications) that must bypass user authorization checks.
     internal: bool = False
 
+    # When True, this event is processed in the system-session pipeline:
+    # the agent runs and the response is delivered via the originating
+    # notifier/observer's own delivery channel (e.g. kanban notifier
+    # adapter.send), NOT via the user-facing reply pipeline. Equivalent
+    # to the cron-job pattern — the user session's transcript and reply
+    # path are never touched, so there is no risk of internal agent
+    # reasoning leaking to the user as a "reply".
+    #
+    # Replaces the old ``silent_reply`` boolean which had to be threaded
+    # through ``_handle_message`` → ``_handle_message_with_agent`` →
+    # ``_run_agent`` → ``_run_agent_via_proxy`` as a kwarg on every
+    # call. ``system_session`` is a single attribute on the event and
+    # is read at the reply-pipeline boundary instead of being plumbed
+    # through every layer.
+    system_session: bool = False
+
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
     

@@ -38,6 +38,19 @@ from tools.registry import registry, tool_error
 logger = logging.getLogger(__name__)
 
 
+# Module-level dict: records the last (platform, chat_id) that invoked
+# each kanban board. Written by kanban tool handlers via _connect(),
+# read by gateway epoch callback to route notifications.
+# Key = board slug, Value = (platform_str, chat_id).
+# Gateway sets the current source before each _handle_message.
+_kanban_board_sources: dict[str, tuple[str, str]] = {}
+_kanban_current_source: tuple[str, str] | None = None
+# Gateway sets this to [(platform_str, chat_id), ...] for all connected
+# adapters' home channels before each _handle_message, so kanban_create
+# can auto-subscribe cross-platform (not just the current source).
+_kanban_all_home_channels: list[tuple[str, str]] = []
+
+
 # ---------------------------------------------------------------------------
 # Gating
 # ---------------------------------------------------------------------------
@@ -161,7 +174,7 @@ def _enforce_worker_task_ownership(tid: str) -> Optional[str]:
     return None
 
 
-def _connect(board: Optional[str] = None):
+def _connect(board: Optional[str] = None, *, update_source: bool = False):
     """Import + connect lazily so the module imports cleanly in non-kanban
     contexts (e.g. test rigs that import every tool module).
 
@@ -171,9 +184,41 @@ def _connect(board: Optional[str] = None):
     (``HERMES_KANBAN_DB`` → ``HERMES_KANBAN_BOARD`` env → current symlink
     → ``default``). Per-tool ``board`` lets a Telegram-side agent override
     the env-pinned active board without restarting Hermes.
+
+    ``update_source=True`` records this (platform, chat_id) as the board's
+    epoch push target. Only set this for write operations (create, complete,
+    block, etc.) — read-only ops (list, show) must NOT hijack the channel.
     """
     from hermes_cli import kanban_db as kb
-    return kb, kb.connect(board=board)
+    conn = kb.connect(board=board)
+    if update_source:
+        try:
+            resolved = kb.get_current_board() if not board else board
+            import tools.kanban_tools as _kt
+            if _kt._kanban_current_source and resolved:
+                _plat, _chat = _kt._kanban_current_source
+                _kt._kanban_board_sources[resolved] = (_plat, _chat)
+                # Also persist the owner in the kanban DB so it survives
+                # gateway restarts and is visible to other gateway
+                # processes. Replaces the in-memory dict's role as the
+                # sole source of truth — see
+                # ``GatewayKanbanWatchersMixin._kanban_lookup_board_owner``.
+                try:
+                    kb.set_board_owner(
+                        conn,
+                        board=resolved,
+                        platform=_plat,
+                        chat_id=_chat,
+                        user_id=os.environ.get("HERMES_KANBAN_SOURCE_USER") or None,
+                    )
+                except Exception:
+                    logger.debug(
+                        "kanban_tools: persistent set_board_owner failed for %s",
+                        resolved, exc_info=True,
+                    )
+        except Exception:
+            pass
+    return kb, conn
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +596,7 @@ def _handle_complete(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             try:
                 ok = kb.complete_task(
@@ -610,7 +655,7 @@ def _handle_block(args: dict, **kw) -> str:
         return tool_error("reason is required — explain what input you need")
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             ok = kb.block_task(
                 conn, tid,
@@ -707,7 +752,7 @@ def _handle_comment(args: dict, **kw) -> str:
     author = os.environ.get("HERMES_PROFILE") or "worker"
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             cid = kb.add_comment(conn, tid, author=author, body=str(body))
             return _ok(task_id=tid, comment_id=cid)
@@ -781,7 +826,7 @@ def _handle_create(args: dict, **kw) -> str:
         )
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             # Inherit the spawning worker's own task workspace when the
             # caller didn't specify one (see resolution note above).
@@ -818,6 +863,73 @@ def _handle_create(args: dict, **kw) -> str:
                 session_id=session_id,
             )
             new_task = kb.get_task(conn, new_tid)
+
+            # Auto-subscribe the current source (platform, chat_id) so the
+            # user who created this task gets terminal-state notifications.
+            # This mirrors what the gateway's /kanban create slash command
+            # does, but runs synchronously in the agent tool context.
+            try:
+                _current = _kanban_current_source
+                # Fallback to env vars when the module-level variable is
+                # not set (e.g. agent running in a thread where the gateway's
+                # module-level injection didn't propagate, or after resume).
+                if not _current:
+                    _plat_env = os.environ.get("HERMES_KANBAN_SOURCE_PLATFORM")
+                    _chat_env = os.environ.get("HERMES_KANBAN_SOURCE_CHAT")
+                    if _plat_env and _chat_env:
+                        _current = (_plat_env, _chat_env)
+                # Third fallback: session context vars set by session_context.py
+                # for ALL session types (gateway, TUI, API, auto-resume).
+                # These are the most reliable because they persist across
+                # gateway restarts and work in non-gateway contexts.
+                # Uses get_session_env() which checks ContextVar first, then
+                # falls back to os.environ for CLI/cron compatibility.
+                if not _current:
+                    try:
+                        from gateway.session_context import get_session_env as _gse
+                        _plat_env = _gse("HERMES_SESSION_PLATFORM", "")
+                        _chat_env = _gse("HERMES_SESSION_CHAT_ID", "")
+                        if _plat_env and _chat_env:
+                            _current = (_plat_env, _chat_env)
+                    except ImportError:
+                        pass  # not running in gateway context
+                if _current and new_tid:
+                    _plat_s, _chat_s = _current
+                    _notifier = os.environ.get("HERMES_PROFILE") or "default"
+                    kb.add_notify_sub(
+                        conn,
+                        task_id=new_tid,
+                        platform=_plat_s,
+                        chat_id=_chat_s,
+                        notifier_profile=_notifier,
+                    )
+                    # Also subscribe other connected platforms via their
+                    # home channels (gateway injects these before each message).
+                    try:
+                        _all_hc = list(_kanban_all_home_channels)
+                        # Fallback to env var for home channels too
+                        if not _all_hc:
+                            _all_hc_env = os.environ.get("HERMES_KANBAN_ALL_HC")
+                            if _all_hc_env:
+                                import json as _json
+                                _parsed = _json.loads(_all_hc_env)
+                                if isinstance(_parsed, list):
+                                    _all_hc = _parsed
+                        for _p, _hc in _all_hc:
+                            if _p == _plat_s:
+                                continue
+                            kb.add_notify_sub(
+                                conn,
+                                task_id=new_tid,
+                                platform=_p,
+                                chat_id=str(_hc),
+                                notifier_profile=_notifier,
+                            )
+                    except Exception:
+                        pass  # best-effort cross-platform sub
+            except Exception:
+                pass  # best-effort; never fail the create for a sub error
+
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
@@ -844,7 +956,7 @@ def _handle_unblock(args: dict, **kw) -> str:
         return ownership_err
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             ok = kb.unblock_task(conn, str(tid))
             if not ok:
@@ -867,7 +979,7 @@ def _handle_link(args: dict, **kw) -> str:
         return tool_error("both parent_id and child_id are required")
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
             return _ok(parent_id=parent_id, child_id=child_id)

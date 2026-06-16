@@ -1217,10 +1217,10 @@ class WeixinAdapter(BasePlatformAdapter):
         # ``gateway.platforms.weixin.extra.text_batch_delay_seconds`` /
         # ``text_batch_split_delay_seconds``.
         self._text_batch_delay_seconds = self._coerce_float_extra(
-            "text_batch_delay_seconds", 3.0
+            "text_batch_delay_seconds", 1.0
         )
         self._text_batch_split_delay_seconds = self._coerce_float_extra(
-            "text_batch_split_delay_seconds", 5.0
+            "text_batch_split_delay_seconds", 2.0
         )
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}

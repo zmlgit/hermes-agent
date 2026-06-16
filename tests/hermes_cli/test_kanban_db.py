@@ -4372,3 +4372,71 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+# ---------------------------------------------------------------------------
+# Board owner — persistent (board, platform, chat_id) record that
+# survives gateway restarts. Replaces the in-memory
+# ``_kanban_last_user_source`` dict in GatewayKanbanWatchersMixin.
+# ---------------------------------------------------------------------------
+
+def test_set_and_get_board_owner(kanban_home):
+    """First writer wins; ``get_board_owner`` returns the most recently
+    updated row."""
+    with kb.connect() as conn:
+        kb.set_board_owner(
+            conn, board="b1", platform="feishu", chat_id="c1",
+        )
+        assert kb.get_board_owner(conn, board="b1") == ("feishu", "c1")
+
+
+def test_set_board_owner_upserts_on_conflict(kanban_home):
+    """Calling set_board_owner twice for the same (board, platform,
+    chat_id) does NOT create a second row — it bumps ``updated_at``
+    and overwrites ``user_id``."""
+    with kb.connect() as conn:
+        kb.set_board_owner(
+            conn, board="b1", platform="feishu", chat_id="c1",
+            user_id="alice",
+        )
+        time.sleep(1.05)  # ensure updated_at moves forward
+        kb.set_board_owner(
+            conn, board="b1", platform="feishu", chat_id="c1",
+            user_id="bob",
+        )
+        owners = kb.list_board_owners(conn, board="b1")
+    assert len(owners) == 1
+    assert owners[0]["user_id"] == "bob"
+
+
+def test_set_board_owner_supports_multiple_owners_per_board(kanban_home):
+    """Multi-user boards (one row per (platform, chat_id)) — the
+    notifier inject path reads only the most recent one via
+    ``get_board_owner``, but the table allows multiple rows so
+    fan-out to all owners stays possible via ``list_board_owners``."""
+    with kb.connect() as conn:
+        kb.set_board_owner(
+            conn, board="b1", platform="feishu", chat_id="alice-chat",
+            user_id="alice",
+        )
+        time.sleep(1.05)
+        kb.set_board_owner(
+            conn, board="b1", platform="telegram", chat_id="bob-chat",
+            user_id="bob",
+        )
+        most_recent = kb.get_board_owner(conn, board="b1")
+        all_owners = kb.list_board_owners(conn, board="b1")
+    assert most_recent == ("telegram", "bob-chat")
+    assert {(o["platform"], o["chat_id"]) for o in all_owners} == {
+        ("feishu", "alice-chat"),
+        ("telegram", "bob-chat"),
+    }
+
+
+def test_get_board_owner_returns_none_when_empty(kanban_home):
+    """No rows → no owner → None. (This is the in-memory cache's
+    back-compat signal — the gateway uses None to decide whether to
+    fall through to the subscription fallback.)"""
+    with kb.connect() as conn:
+        assert kb.get_board_owner(conn, board="never-touched") is None
+        assert kb.list_board_owners(conn, board="never-touched") == []

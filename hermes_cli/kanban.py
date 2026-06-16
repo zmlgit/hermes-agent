@@ -707,6 +707,46 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_nrm.add_argument("--chat-id", required=True)
     p_nrm.add_argument("--thread-id", default=None)
 
+    # --- board subscribe / list / unsubscribe ---
+    p_bsub = sub.add_parser(
+        "board-subscribe",
+        help="Subscribe a gateway source to board-level events "
+             "(e.g. all task completions on the default board)",
+    )
+    p_bsub.add_argument(
+        "--scope", default="task_done",
+        choices=("task_done", "task_blocked", "task_failed",
+                 "task_crashed", "task_gave_up", "task_timed_out",
+                 "task_all", "epoch_end", "*"),
+        help="Event scope filter (default: task_done). 'task_all' or '*' catches all terminal events.",
+    )
+    p_bsub.add_argument("--platform", required=True)
+    p_bsub.add_argument("--chat-id", required=True)
+    p_bsub.add_argument("--thread-id", default=None)
+    p_bsub.add_argument("--board", default=None,
+                        help="Board slug (default: active board)")
+    p_bsub.add_argument("--notifier-profile", default=None)
+
+    p_blist = sub.add_parser(
+        "board-subs",
+        help="List board-level event subscriptions",
+    )
+    p_blist.add_argument("--board", default=None,
+                         help="Filter by board slug")
+    p_blist.add_argument("--scope", default=None,
+                          help="Filter by scope")
+    p_blist.add_argument("--json", action="store_true")
+
+    p_bunsub = sub.add_parser(
+        "board-unsubscribe",
+        help="Remove a board-level event subscription",
+    )
+    p_bunsub.add_argument("--scope", default="task_done")
+    p_bunsub.add_argument("--platform", required=True)
+    p_bunsub.add_argument("--chat-id", required=True)
+    p_bunsub.add_argument("--thread-id", default=None)
+    p_bunsub.add_argument("--board", default=None)
+
     # --- log ---
     p_log = sub.add_parser(
         "log",
@@ -955,6 +995,9 @@ def kanban_command(args: argparse.Namespace) -> int:
             "notify-subscribe":   _cmd_notify_subscribe,
             "notify-list":        _cmd_notify_list,
             "notify-unsubscribe": _cmd_notify_unsubscribe,
+            "board-subscribe":    _cmd_board_subscribe,
+            "board-subs":         _cmd_board_list,
+            "board-unsubscribe":  _cmd_board_unsubscribe,
             "context":  _cmd_context,
             "specify":  _cmd_specify,
             "decompose":  _cmd_decompose,
@@ -2461,6 +2504,60 @@ def _cmd_notify_unsubscribe(args: argparse.Namespace) -> int:
         print("(no such subscription)", file=sys.stderr)
         return 1
     print(f"Unsubscribed from {args.task_id}")
+    return 0
+
+
+def _board_target_payload(args: argparse.Namespace) -> str:
+    """Build the JSON target_payload for a board subscription."""
+    import json as _json
+    payload: dict = {"platform": args.platform, "chat_id": args.chat_id}
+    if args.thread_id:
+        payload["thread_id"] = args.thread_id
+    return _json.dumps(payload, sort_keys=True)
+
+
+def _cmd_board_subscribe(args: argparse.Namespace) -> int:
+    board = args.board or kb.get_current_board()
+    tp = _board_target_payload(args)
+    with kb.connect_closing(board=board) as conn:
+        kb.add_board_sub(
+            conn, board=board, scope=args.scope,
+            target_kind="platform_chat", target_payload=tp,
+            notifier_profile=args.notifier_profile or _profile_author(),
+        )
+    print(f"Board sub [{board}/{args.scope}] → {args.platform}:{args.chat_id}"
+          + (f":{args.thread_id}" if args.thread_id else ""))
+    return 0
+
+
+def _cmd_board_list(args: argparse.Namespace) -> int:
+    board = args.board or kb.get_current_board()
+    with kb.connect_closing(board=board) as conn:
+        subs = kb.list_board_subs(conn, scope=args.scope)
+    if getattr(args, "json", False):
+        print(json.dumps(subs, indent=2, ensure_ascii=False))
+        return 0
+    if not subs:
+        print("(no board subscriptions)")
+        return 0
+    for s in subs:
+        print(f"  {s['board']:12s}  {s['scope']:12s}  {s['target_kind']}  "
+              f"{s['target_payload']}  (cursor={s['last_event_id']})")
+    return 0
+
+
+def _cmd_board_unsubscribe(args: argparse.Namespace) -> int:
+    board = args.board or kb.get_current_board()
+    tp = _board_target_payload(args)
+    with kb.connect_closing(board=board) as conn:
+        ok = kb.remove_board_sub(
+            conn, board=board, scope=args.scope,
+            target_kind="platform_chat", target_payload=tp,
+        )
+    if not ok:
+        print("(no such board subscription)", file=sys.stderr)
+        return 1
+    print(f"Unsubscribed [{board}/{args.scope}]")
     return 0
 
 

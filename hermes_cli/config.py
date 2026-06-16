@@ -2149,6 +2149,23 @@ DEFAULT_CONFIG = {
         # decomposer prompt, model, or skills; configure that LLM path under
         # auxiliary.kanban_decomposer.
         "orchestrator_profile": "",
+        # Enable the orchestrator epoch callback. When true, the notifier
+        # watcher detects when a board transitions from 'workers in_progress'
+        # to 'all idle' and injects an internal MessageEvent into the
+        # orchestrator profile's gateway session, enabling spiral/epoch-
+        # based workflows without manual intervention.
+        "orchestrator_notify": False,
+        # Min seconds between epoch notifications per board (rate limit).
+        "orchestrator_cooldown_seconds": 30,
+        # Optional board slug allowlist. If set, only these boards trigger
+        # orchestrator epoch notifications.
+        "orchestrator_boards": [],
+        # Max consecutive stale triggers before suppressing a board.
+        # A "stale" trigger fires when no ready tasks and no task just
+        # completed — the board is simply idle.
+        "orchestrator_max_stale": 3,
+        # Max epoch notifications per board. Prevents infinite spirals.
+        "orchestrator_max_epochs": 10,
         # Where a child task lands if the orchestrator can't match an
         # assignee to any installed profile. When unset, falls back to the
         # default profile. A task never ends up with assignee=None.
