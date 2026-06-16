@@ -15,6 +15,11 @@ Events:
   - agent:step          -- Each turn in the tool-calling loop
   - agent:end           -- Agent finishes processing
   - command:*           -- Any slash command executed (wildcard match)
+  - kanban:task:completed -- Kanban worker completed a task
+  - kanban:task:blocked   -- Kanban worker blocked a task
+  - kanban:task:crashed   -- Kanban worker process crashed
+  - kanban:task:timed_out -- Kanban worker exceeded max_runtime_seconds
+  - kanban:board:epoch_end -- All running tasks on a board finished
 
 Errors in hooks are caught and logged but never block the main pipeline.
 

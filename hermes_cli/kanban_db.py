@@ -1135,6 +1135,50 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
+
+-- Board-level event subscriptions.  Unlike kanban_notify_subs (which is
+-- keyed per-task), this table allows a subscriber to receive events for an
+-- entire board filtered by event scope (e.g. all task completions on the
+-- default board).
+--
+-- target_kind / target_payload follow the same shape as
+-- gateway/kanban_watchers.py ``_kanban_notifier_watcher`` delivery targets.
+CREATE TABLE IF NOT EXISTS kanban_board_subs (
+    board         TEXT NOT NULL DEFAULT '__default__',
+    scope         TEXT NOT NULL DEFAULT 'task_done',
+    target_kind   TEXT NOT NULL DEFAULT 'platform_chat',
+    target_payload TEXT NOT NULL DEFAULT '{}',
+    user_id       TEXT,
+    notifier_profile TEXT,
+    created_at    INTEGER NOT NULL,
+    last_event_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (board, scope, target_kind, target_payload)
+);
+
+CREATE INDEX IF NOT EXISTS idx_board_subs_board       ON kanban_board_subs(board);
+CREATE INDEX IF NOT EXISTS idx_board_subs_cursor      ON kanban_board_subs(board, last_event_id);
+
+-- Per-board owner: the (platform, chat_id) of the user session that
+-- last operated on this board. Replaces the in-memory
+-- ``_kanban_last_user_source`` dict in
+-- gateway/kanban_watchers.py:GatewayKanbanWatchersMixin so the
+-- owner survives gateway restarts and works across multiple
+-- gateway processes (multi-worker). The notifier inject path reads
+-- this table to decide where to deliver a synthetic
+-- ``[KANBAN-EVENT]`` message when a subscribed task reaches a
+-- terminal state. Multiple rows per board are allowed (multi-user
+-- boards) — the watcher picks the most recently updated row.
+CREATE TABLE IF NOT EXISTS kanban_board_owners (
+    board      TEXT NOT NULL,
+    platform   TEXT NOT NULL,
+    chat_id    TEXT NOT NULL,
+    user_id    TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (board, platform, chat_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_board_owners_board  ON kanban_board_owners(board);
+CREATE INDEX IF NOT EXISTS idx_board_owners_recent ON kanban_board_owners(board, updated_at DESC);
 """
 
 
@@ -1733,6 +1777,75 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
             )
+
+    # Board-level subscriptions (added alongside task-level subscriptions).
+    # The table is created in SCHEMA_SQL so new DBs get it automatically.
+    # This migration only runs on legacy DBs that lack it.
+    #
+    # Note: split into per-statement ``execute`` calls (not a single
+    # multi-statement ``conn.execute(SQL)``) because Python's stdlib
+    # sqlite3 driver raises ``ProgrammingError: You can only execute
+    # one statement at a time`` when given a multi-statement string.
+    # ``executescript()`` would work but it implicitly commits and
+    # bypasses ``write_txn``'s serialization. We want the migration
+    # to participate in the caller's transaction. Splitting is cheap
+    # (a handful of DDL statements) and keeps the surrounding
+    # write_txn contract intact.
+    board_subs_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_board_subs'"
+    ).fetchone() is not None
+    if not board_subs_exists:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kanban_board_subs (
+                board         TEXT NOT NULL DEFAULT '__default__',
+                scope         TEXT NOT NULL DEFAULT 'task_done',
+                target_kind   TEXT NOT NULL DEFAULT 'platform_chat',
+                target_payload TEXT NOT NULL DEFAULT '{}',
+                user_id       TEXT,
+                notifier_profile TEXT,
+                created_at    INTEGER NOT NULL,
+                last_event_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (board, scope, target_kind, target_payload)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_board_subs_board "
+            "ON kanban_board_subs(board)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_board_subs_cursor "
+            "ON kanban_board_subs(board, last_event_id)"
+        )
+
+    # Board-level owner table (added in the silent_reply→system_session
+    # refactor). Same split-into-single-statements rationale as
+    # ``kanban_board_subs`` above.
+    board_owners_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_board_owners'"
+    ).fetchone() is not None
+    if not board_owners_exists:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kanban_board_owners (
+                board      TEXT NOT NULL,
+                platform   TEXT NOT NULL,
+                chat_id    TEXT NOT NULL,
+                user_id    TEXT,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (board, platform, chat_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_board_owners_board "
+            "ON kanban_board_owners(board)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_board_owners_recent "
+            "ON kanban_board_owners(board, updated_at DESC)"
+        )
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
@@ -3739,6 +3852,153 @@ def complete_task(
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     return True
+
+
+# Statuses that mean "this child is finished from the parent's perspective".
+# Mirrors the terminal set the orchestrator epoch callback watches for
+# (see ``gateway/kanban_watchers.py`` _detect_epoch). When ALL of a
+# parent's children are in this set, the parent can be auto-completed.
+_AUTO_COMPLETE_CHILD_TERMINAL = frozenset({
+    "done", "archived", "blocked", "crashed", "gave_up", "timed_out",
+})
+
+
+def auto_complete_parents(
+    conn: sqlite3.Connection,
+    task_ids: Iterable[str],
+) -> list[str]:
+    """Auto-complete any parent whose children are all in a terminal state.
+
+    Given a batch of task ids that just reached a terminal state (e.g.
+    the events the orchestrator epoch callback just observed), walk
+    upward in the ``task_links`` graph and check every parent. A parent
+    is auto-completed when:
+
+    1. The parent itself is in ``running`` status. Anything already in a
+       terminal status (``done`` / ``archived`` / ``blocked`` / etc.) is
+       skipped — no double-completion, no resurrecting archived work.
+    2. Every one of the parent's children is in
+       :data:`_AUTO_COMPLETE_CHILD_TERMINAL`. A child still in
+       ``todo`` / ``ready`` / ``running`` / ``scheduled`` / ``triage``
+       / ``review`` means the parent still has live work to wait for.
+    3. The parent's own parents are all in a terminal status. If a
+       grandparent is still ``running``, completing this parent would
+       leak past an upstream gate (the parent's worker likely depends on
+       its own parent being settled). We refuse in that case so the
+       human / orchestrator can decide explicitly.
+
+    Auto-completion reuses :func:`complete_task` so all the existing
+    side effects fire: the run is closed via :func:`_end_run`, a
+    ``completed`` event is appended, the consecutive-failures counter
+    is cleared, ``recompute_ready`` cascades, and the scratch workspace
+    is cleaned up. We pass a synthetic summary / metadata so the event
+    payload is self-describing and downstream workers reading
+    ``build_worker_context`` can tell the completion was mechanical
+    rather than a real worker ``kanban_complete`` call.
+
+    Returns the list of task ids that were auto-completed (parents that
+    transitioned to ``done`` as a side effect of this call). Order is
+    bottom-up: a parent that itself just got auto-completed will be
+    visible to subsequent iterations of the loop, so a multi-level
+    chain (grandparent → parent → child) can collapse in a single
+    invocation when every child is terminal.
+
+    Safe to call inside or outside an existing transaction; each
+    candidate completion opens its own ``write_txn`` via
+    :func:`complete_task`.
+    """
+    completed: list[str] = []
+    seen: set[str] = set()
+    # Iterate to a fixed point so chained auto-completions (a parent
+    # whose parent is also a "children all terminal" candidate) all
+    # get processed in one call. The ``seen`` set guards against cycles
+    # in the link graph.
+    queue: list[str] = [str(t).strip() for t in task_ids if str(t).strip()]
+    while queue:
+        next_batch: list[str] = []
+        for task_id in queue:
+            if task_id in seen:
+                continue
+            seen.add(task_id)
+            # Find every parent of this just-finished child.
+            parent_rows = conn.execute(
+                "SELECT t.id, t.status FROM tasks t "
+                "JOIN task_links l ON l.parent_id = t.id "
+                "WHERE l.child_id = ?",
+                (task_id,),
+            ).fetchall()
+            for prow in parent_rows:
+                parent_id = prow["id"]
+                if parent_id in seen:
+                    # Already processed in this call (or queued) — skip
+                    # to avoid redundant DB work. The fixed-point loop
+                    # below catches any parent that became eligible
+                    # because of a sibling completing earlier in the
+                    # queue.
+                    continue
+                parent_status = prow["status"]
+                # Gate 1: only auto-complete active parents.
+                if parent_status != "running":
+                    continue
+                # Gate 2: every child of the parent must be terminal.
+                child_statuses = conn.execute(
+                    "SELECT t.status FROM tasks t "
+                    "JOIN task_links l ON l.child_id = t.id "
+                    "WHERE l.parent_id = ?",
+                    (parent_id,),
+                ).fetchall()
+                if not child_statuses:
+                    # Parent has no children at all — leave it for the
+                    # worker / orchestrator to close explicitly. Auto
+                    # completion is only for "children all done" cases.
+                    continue
+                if not all(
+                    c["status"] in _AUTO_COMPLETE_CHILD_TERMINAL
+                    for c in child_statuses
+                ):
+                    continue
+                # Gate 3: the parent's own parents must all be terminal
+                # too. Otherwise completing the parent would silently
+                # bypass an upstream gate the grandparent represents
+                # (e.g. the grandparent is a human-review card that
+                # hasn't been approved yet).
+                gp_statuses = conn.execute(
+                    "SELECT t.status FROM tasks t "
+                    "JOIN task_links l ON l.parent_id = t.id "
+                    "WHERE l.child_id = ?",
+                    (parent_id,),
+                ).fetchall()
+                if gp_statuses and not all(
+                    g["status"] in _AUTO_COMPLETE_CHILD_TERMINAL
+                    for g in gp_statuses
+                ):
+                    continue
+                # All gates passed — auto-complete via the existing
+                # path. ``expected_run_id`` is intentionally NOT set:
+                # this is a system-driven close, not a worker's CAS,
+                # and we don't want a stale run id to block it.
+                ok = complete_task(
+                    conn,
+                    parent_id,
+                    summary=(
+                        f"auto-completed by kanban_db.auto_complete_parents: "
+                        f"all {len(child_statuses)} child task(s) reached terminal state"
+                    ),
+                    metadata={
+                        "auto_completed": True,
+                        "reason": "all_children_terminal",
+                        "child_count": len(child_statuses),
+                    },
+                )
+                if ok:
+                    completed.append(parent_id)
+                    seen.add(parent_id)
+                    # Re-queue so any grandparent of this parent is
+                    # re-checked — completing this parent may have
+                    # made the grandparent eligible.
+                    next_batch.append(parent_id)
+        queue = next_batch
+    return completed
 
 
 # ---------------------------------------------------------------------------
@@ -7472,8 +7732,242 @@ def rewind_notify_cursor(
 
 
 # ---------------------------------------------------------------------------
-# Retention + garbage collection
+# Board-level event subscriptions
 # ---------------------------------------------------------------------------
+
+# Scopes that a board subscriber can filter on.  ``'*'`` receives everything.
+BOARD_SUB_SCOPES = ("task_done", "task_blocked", "task_failed", "task_crashed",
+                    "task_timed_out", "epoch_end", "*")
+
+
+def add_board_sub(
+    conn: sqlite3.Connection,
+    *,
+    board: str = "__default__",
+    scope: str = "task_done",
+    target_kind: str = "platform_chat",
+    target_payload: str = "{}",
+    user_id: Optional[str] = None,
+    notifier_profile: Optional[str] = None,
+) -> None:
+    """Register a board-level event subscription.  Idempotent on the PK."""
+    if scope not in BOARD_SUB_SCOPES:
+        raise ValueError(f"Invalid board sub scope: {scope!r}. "
+                         f"Must be one of {BOARD_SUB_SCOPES}")
+    now = int(time.time())
+    with write_txn(conn):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO kanban_board_subs
+                (board, scope, target_kind, target_payload,
+                 user_id, notifier_profile, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (board, scope, target_kind, target_payload,
+             user_id, notifier_profile, now),
+        )
+
+
+def remove_board_sub(
+    conn: sqlite3.Connection,
+    *,
+    board: str = "__default__",
+    scope: str = "task_done",
+    target_kind: str = "platform_chat",
+    target_payload: str = "{}",
+) -> bool:
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM kanban_board_subs "
+            "WHERE board = ? AND scope = ? AND target_kind = ? AND target_payload = ?",
+            (board, scope, target_kind, target_payload),
+        )
+    return cur.rowcount > 0
+
+
+def list_board_subs(
+    conn: sqlite3.Connection,
+    *,
+    board: Optional[str] = None,
+    scope: Optional[str] = None,
+) -> list[dict]:
+    q = "SELECT * FROM kanban_board_subs WHERE 1=1"
+    params: list[Any] = []
+    if board is not None:
+        q += " AND board = ?"
+        params.append(board)
+    if scope is not None:
+        q += " AND scope = ?"
+        params.append(scope)
+    return [dict(r) for r in conn.execute(q, params).fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Board owner — persistent record of the (platform, chat_id) that last
+# operated on each board. Replaces the in-memory
+# ``_kanban_last_user_source`` dict in
+# gateway/kanban_watchers.py:GatewayKanbanWatchersMixin.
+# ---------------------------------------------------------------------------
+
+def set_board_owner(
+    conn: sqlite3.Connection,
+    *,
+    board: str,
+    platform: str,
+    chat_id: str,
+    user_id: Optional[str] = None,
+) -> None:
+    """Record (or refresh) the owner of *board* as *(platform, chat_id)*.
+
+    Idempotent on the (board, platform, chat_id) primary key — repeated
+    calls bump ``updated_at`` and overwrite ``user_id`` rather than
+    insert a duplicate row. Multiple owners per board are allowed
+    (one row per (board, platform, chat_id) tuple), so a board with
+    three active users in three chats ends up with three rows.
+    """
+    now = int(time.time())
+    with write_txn(conn):
+        conn.execute(
+            """
+            INSERT INTO kanban_board_owners
+                (board, platform, chat_id, user_id, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(board, platform, chat_id) DO UPDATE SET
+                user_id    = excluded.user_id,
+                updated_at = excluded.updated_at
+            """,
+            (board, platform, chat_id, user_id, now),
+        )
+
+
+def get_board_owner(
+    conn: sqlite3.Connection,
+    *,
+    board: str,
+) -> Optional[tuple[str, str]]:
+    """Return the most recently active owner's (platform, chat_id) for
+    *board*, or ``None`` if no owner has been recorded.
+
+    Used by the kanban notifier's inject path
+    (``GatewayKanbanWatchersMixin._kanban_lookup_board_owner``) to
+    decide which chat to deliver a synthetic ``[KANBAN-EVENT]``
+    message to. Multi-user boards return the most recently active
+    owner; if you need to fan out to all owners, query
+    ``list_board_owners`` instead.
+    """
+    row = conn.execute(
+        "SELECT platform, chat_id FROM kanban_board_owners "
+        "WHERE board = ? ORDER BY updated_at DESC LIMIT 1",
+        (board,),
+    ).fetchone()
+    if row is None:
+        return None
+    return (row[0], row[1])
+
+
+def list_board_owners(
+    conn: sqlite3.Connection,
+    *,
+    board: str,
+) -> list[dict]:
+    """List every owner recorded for *board* (one row per
+    (platform, chat_id) tuple), most-recently-active first.
+    """
+    rows = conn.execute(
+        "SELECT board, platform, chat_id, user_id, updated_at "
+        "FROM kanban_board_owners WHERE board = ? "
+        "ORDER BY updated_at DESC",
+        (board,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def claim_unseen_board_events(
+    conn: sqlite3.Connection,
+    *,
+    board: str = "__default__",
+    scope: str = "task_done",
+    target_kind: str = "platform_chat",
+    target_payload: str = "{}",
+    kinds: Optional[Iterable[str]] = None,
+) -> tuple[int, int, list[Event]]:
+    """Atomically claim unseen board-level events for one subscription.
+
+    Returns ``(old_cursor, new_cursor, events)``.  Board events are read
+    from ``task_events``.  The connection must be board-scoped (each board
+    has its own SQLite file, so ``t.board`` is not needed — the connection
+    itself is the board boundary).
+
+    The scope filter maps task event kinds to board subscription scopes:
+
+    - ``task_done``      → ``completed``
+    - ``task_blocked``   → ``blocked``
+    - ``task_failed``    → ``blocked``  (auto-blocked after failures)
+    - ``task_crashed``   → ``crashed``
+    - ``task_gave_up``   → ``gave_up``
+    - ``task_timed_out`` → ``timed_out``
+    - ``epoch_end``      → never matched per-task (see dispatcher hook)
+    - ``task_all`` or ``*`` → all of the above
+    """
+    _SCOPE_KIND_MAP = {
+        "task_done": ("completed",),
+        "task_blocked": ("blocked",),
+        "task_failed": ("blocked",),
+        "task_crashed": ("crashed",),
+        "task_gave_up": ("gave_up",),
+        "task_timed_out": ("timed_out",),
+        "epoch_end": (),
+        "task_all": ("completed", "blocked", "crashed", "gave_up", "timed_out"),
+        "*": ("completed", "blocked", "crashed", "gave_up", "timed_out"),
+    }
+    event_kinds = list(kinds) if kinds else list(_SCOPE_KIND_MAP.get(scope, ()))
+    if not event_kinds:
+        return 0, 0, []
+
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT last_event_id FROM kanban_board_subs "
+            "WHERE board = ? AND scope = ? AND target_kind = ? AND target_payload = ?",
+            (board, scope, target_kind, target_payload),
+        ).fetchone()
+        if row is None:
+            return 0, 0, []
+        old_cursor = int(row["last_event_id"])
+
+        params: list[Any] = event_kinds + [old_cursor]
+        rows = conn.execute(
+            f"""
+            SELECT * FROM task_events
+            WHERE kind IN ({",".join("?" * len(event_kinds))})
+              AND id > ?
+            ORDER BY id ASC
+            """,
+            params,
+        ).fetchall()
+
+        new_cursor = old_cursor
+        events: list[Event] = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"]) if r["payload"] else None
+            except Exception:
+                payload = None
+            events.append(Event(
+                id=r["id"], task_id=r["task_id"], kind=r["kind"],
+                payload=payload, created_at=r["created_at"],
+                run_id=(int(r["run_id"]) if "run_id" in r.keys()
+                        and r["run_id"] is not None else None),
+            ))
+            new_cursor = max(new_cursor, int(r["id"]))
+
+        if events:
+            conn.execute(
+                "UPDATE kanban_board_subs SET last_event_id = ? "
+                "WHERE board = ? AND scope = ? AND target_kind = ? AND target_payload = ? "
+                "AND last_event_id = ?",
+                (new_cursor, board, scope, target_kind, target_payload, old_cursor),
+            )
+        return old_cursor, new_cursor, events
 
 def gc_events(
     conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600,
