@@ -6385,13 +6385,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _chat_s = str(getattr(source, "chat_id", "") or "")
                 if _plat_s and _chat_s and _plat_s not in ("webhook", "api_server", "system"):
                     import tools.kanban_tools as _kt
-                    _kt._kanban_current_source = (_plat_s, _chat_s)
+                    # ContextVar for per-session isolation — module-level globals
+                    # and os.environ are shared across concurrent sessions and
+                    # cause cross-board source leakage.
+                    from gateway.session_context import _KANBAN_SOURCE_PLATFORM, _KANBAN_SOURCE_CHAT
+                    _KANBAN_SOURCE_PLATFORM.set(_plat_s)
+                    _KANBAN_SOURCE_CHAT.set(_chat_s)
                     self._kanban_last_user_source = _kt._kanban_board_sources
-                    # Also write env vars as fallback so agent threads /
-                    # subprocesses can discover the source even when the
-                    # module-level variable doesn't propagate correctly.
-                    os.environ["HERMES_KANBAN_SOURCE_PLATFORM"] = _plat_s
-                    os.environ["HERMES_KANBAN_SOURCE_CHAT"] = _chat_s
             except Exception:
                 pass
 
@@ -6411,7 +6411,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _all_hc.append((_p_s, str(_hc)))
             import tools.kanban_tools as _kt
             _kt._kanban_all_home_channels = _all_hc
-            os.environ["HERMES_KANBAN_ALL_HC"] = json.dumps(_all_hc)
         except Exception:
             pass
 

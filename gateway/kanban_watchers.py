@@ -231,6 +231,18 @@ class GatewayKanbanWatchersMixin:
             last_src = _src_map.get(slug)
 
             if not last_src or not last_src[0]:
+                # Unify with notifier inject: prefer persistent board owner
+                # table over in-memory cache to avoid routing to a different
+                # session than the notifier would pick.
+                try:
+                    from hermes_cli import kanban_db as _kb
+                    _owner = self._kanban_lookup_board_owner(slug, db_mod=_kb)
+                    if _owner and _owner[0]:
+                        last_src = _owner
+                except Exception:
+                    pass
+
+            if not last_src or not last_src[0]:
                 logger.debug(
                     "kanban orchestrator callback: no source for board %s, skipping",
                     slug,
@@ -502,12 +514,21 @@ class GatewayKanbanWatchersMixin:
                             _summary = ""
                     if not _summary and _tinfo and _tinfo[2]:
                         _summary = _tinfo[2][:200]
+                    # Extract reason for blocked events (used by auto-handling)
+                    _reason = ""
+                    if _payload:
+                        try:
+                            _p = json.loads(_payload)
+                            _reason = _p.get("reason", "")
+                        except Exception:
+                            _reason = ""
                     event_details.append({
                         "task_id": _tid,
                         "kind": _kind,
                         "title": _title,
                         "assignee": _assignee,
                         "summary": _summary,
+                        "reason": _reason,
                     })
                 any_terminal = len(recent_events) > 0
                 # Query blocked count here while conn is still open.
@@ -771,6 +792,51 @@ class GatewayKanbanWatchersMixin:
         msg_lines.append(f"(epoch {current_epoch}/{MAX_EPOCHS})")
 
         # Orchestrator instructions — the LLM receives this as the user message.
+        # ── Event-specific action table (auto-closure logic) ──────────
+        blocked_events = [ed for ed in events if ed["kind"] == "blocked"]
+        crashed_events = [ed for ed in events if ed["kind"] in ("crashed", "gave_up")]
+        completed_events = [ed for ed in events if ed["kind"] == "completed"]
+
+        msg_lines.append("")
+        msg_lines.append("--- Event Auto-Handling Rules ---")
+        msg_lines.append("IMPORTANT: You are the event closer. ACT, don't report.")
+
+        if blocked_events:
+            msg_lines.append("")
+            msg_lines.append("### Blocked Events — must resolve NOW:")
+            for ed in blocked_events:
+                reason_hint = f" — {ed.get('reason', '')[:120]}" if ed.get("reason") else ""
+                msg_lines.append(f"- `{ed['task_id']}`: {ed['title']}{reason_hint}")
+            msg_lines.append("")
+            msg_lines.append("For each blocked task, apply the matching rule:")
+            msg_lines.append("  • reason starts with 'review-required': read the changes (kanban_show),")
+            msg_lines.append("    review the output. If OK → kanban_unblock. If issues → kanban_comment.")
+            msg_lines.append("  • reason starts with '❌ 验证失败': kanban_comment the failure reason,")
+            msg_lines.append("    then decide — fix & unblock OR re-dispatch to the assignee.")
+            msg_lines.append("  • reason starts with '⚠️ 需人工确认': ONLY notify the user, do nothing else.")
+            msg_lines.append("  • reason is empty or 'unknown': inspect (kanban_show), determine cause,")
+            msg_lines.append("    then unblock or re-dispatch.")
+
+        if crashed_events:
+            msg_lines.append("")
+            msg_lines.append("### Crashed/Gave-up Events — take over or re-dispatch:")
+            for ed in crashed_events:
+                msg_lines.append(f"- `{ed['task_id']}`: {ed['title']} (@{ed['assignee']})")
+            msg_lines.append("")
+            msg_lines.append("These workers FAILED. Do NOT just report the failure.")
+            msg_lines.append("  • Simple verification tasks (compile, grep, test < 5min):")
+            msg_lines.append("    → DO IT YOURSELF with terminal/search_files, then kanban_complete.")
+            msg_lines.append("  • Complex implementation: create a fresh task card, assign appropriately.")
+            msg_lines.append("  • Body contained bad instructions (oc.sh, nonexistent commands):")
+            msg_lines.append("    → kanban_comment with correct workflow, then kanban_unblock.")
+
+        if completed_events:
+            msg_lines.append("")
+            msg_lines.append("### Completed Events — chain propagation:")
+            msg_lines.append("  • Check if any blocked child task now has all parents done → unblock.")
+            msg_lines.append("  • Check if all children of a parent are terminal → complete the parent.")
+
+        # ── General orchestrator instructions ─────────────────────────
         msg_lines.append("")
         msg_lines.append("--- Orchestrator Instructions ---")
         msg_lines.append(f"Board '{board_slug}': {ready_count} ready, {len(in_progress_names)} running")
@@ -785,13 +851,11 @@ class GatewayKanbanWatchersMixin:
         msg_lines.append("Your text response will NOT be seen by anyone. Only tool results matter.")
         msg_lines.append("")
         msg_lines.append("Actions to take:")
-        msg_lines.append("1. Check the board — run `kanban list` or `kanban show` on blocked/crashed tasks")
-        msg_lines.append("2. For blocked: identify the blocker and decide — re-assign, re-decompose, or unblock")
-        msg_lines.append("3. For crashed/gave_up: re-dispatch the task (worker LLM may have run out of budget)")
-        msg_lines.append("4. For completed: if there are ready/pending items, create the next epoch's tasks")
-        msg_lines.append("5. Be mindful of budget — don't create too many parallel tasks at once")
-        msg_lines.append("6. Only create kanban tasks — the worker system handles execution")
-        msg_lines.append("7. Do NOT send messages to the user — results are delivered automatically")
+        msg_lines.append("1. First: resolve ALL blocked/crashed/gave_up events above (see Event Auto-Handling Rules)")
+        msg_lines.append("2. Then: if there are ready/pending items, create the next epoch's tasks")
+        msg_lines.append("3. Be mindful of budget — don't create too many parallel tasks at once")
+        msg_lines.append("4. Only create kanban tasks — the worker system handles execution")
+        msg_lines.append("5. Do NOT send messages to the user — results are delivered automatically")
         return "\n".join(msg_lines)
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
@@ -895,7 +959,7 @@ class GatewayKanbanWatchersMixin:
                         boards = _kb.list_boards(include_archived=False)
                     except Exception:
                         boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-                    seen_db_paths: set[str] = set()
+                    seen_db_paths: dict[str, set[str]] = {}
                     for board_meta in boards:
                         slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
                         db_path = board_meta.get("db_path")
@@ -904,12 +968,16 @@ class GatewayKanbanWatchersMixin:
                         except Exception:
                             resolved_db_path = f"slug:{slug}"
                         if resolved_db_path in seen_db_paths:
-                            logger.debug(
-                                "kanban notifier: skipping duplicate board slug %s for DB %s",
-                                slug, resolved_db_path,
-                            )
-                            continue
-                        seen_db_paths.add(resolved_db_path)
+                            # When multiple slugs map to the same DB, we still
+                            # need to process events for EACH slug separately
+                            # — skip only truly duplicate (db_path, slug) pairs.
+                            if slug in seen_db_paths.get(resolved_db_path, set()):
+                                logger.debug(
+                                    "kanban notifier: skipping duplicate board slug %s for DB %s",
+                                    slug, resolved_db_path,
+                                )
+                                continue
+                        seen_db_paths.setdefault(resolved_db_path, set()).add(slug)
                         try:
                             conn = _kb.connect(board=slug)
                         except Exception as exc:

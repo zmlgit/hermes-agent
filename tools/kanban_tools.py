@@ -44,7 +44,10 @@ logger = logging.getLogger(__name__)
 # Key = board slug, Value = (platform_str, chat_id).
 # Gateway sets the current source before each _handle_message.
 _kanban_board_sources: dict[str, tuple[str, str]] = {}
-_kanban_current_source: tuple[str, str] | None = None
+# NOTE: _kanban_current_source was removed (serialisation risk with
+# concurrent sessions). All source resolution now goes through
+# contextvars (HERMES_KANBAN_SOURCE_PLATFORM / CHAT in
+# gateway.session_context).
 # Gateway sets this to [(platform_str, chat_id), ...] for all connected
 # adapters' home channels before each _handle_message, so kanban_create
 # can auto-subscribe cross-platform (not just the current source).
@@ -195,8 +198,21 @@ def _connect(board: Optional[str] = None, *, update_source: bool = False):
         try:
             resolved = kb.get_current_board() if not board else board
             import tools.kanban_tools as _kt
-            if _kt._kanban_current_source and resolved:
-                _plat, _chat = _kt._kanban_current_source
+            # Prefer ContextVar (per-session, concurrent-safe) over
+            # module-level global (shared across sessions, causes cross-board
+            # source leakage when two workers run concurrently).
+            _current_src = None
+            try:
+                from gateway.session_context import _KANBAN_SOURCE_PLATFORM, _KANBAN_SOURCE_CHAT
+                _p = _KANBAN_SOURCE_PLATFORM.get()
+                _c = _KANBAN_SOURCE_CHAT.get()
+                if _p and _c:
+                    _current_src = (_p, _c)
+            except Exception:
+                pass
+            # _kanban_current_source removed — ContextVar is the only path now.
+            if _current_src and resolved:
+                _plat, _chat = _current_src
                 _kt._kanban_board_sources[resolved] = (_plat, _chat)
                 # Also persist the owner in the kanban DB so it survives
                 # gateway restarts and is visible to other gateway
@@ -869,21 +885,18 @@ def _handle_create(args: dict, **kw) -> str:
             # This mirrors what the gateway's /kanban create slash command
             # does, but runs synchronously in the agent tool context.
             try:
-                _current = _kanban_current_source
-                # Fallback to env vars when the module-level variable is
-                # not set (e.g. agent running in a thread where the gateway's
-                # module-level injection didn't propagate, or after resume).
-                if not _current:
-                    _plat_env = os.environ.get("HERMES_KANBAN_SOURCE_PLATFORM")
-                    _chat_env = os.environ.get("HERMES_KANBAN_SOURCE_CHAT")
-                    if _plat_env and _chat_env:
-                        _current = (_plat_env, _chat_env)
-                # Third fallback: session context vars set by session_context.py
-                # for ALL session types (gateway, TUI, API, auto-resume).
-                # These are the most reliable because they persist across
-                # gateway restarts and work in non-gateway contexts.
-                # Uses get_session_env() which checks ContextVar first, then
-                # falls back to os.environ for CLI/cron compatibility.
+                # Resolution order (concurrent-safe first):
+                # 1. ContextVar HERMES_KANBAN_SOURCE_PLATFORM/CHAT (per-session)
+                # 2. Session context HERMES_SESSION_PLATFORM/CHAT_ID
+                _current = None
+                try:
+                    from gateway.session_context import _KANBAN_SOURCE_PLATFORM, _KANBAN_SOURCE_CHAT
+                    _p = _KANBAN_SOURCE_PLATFORM.get()
+                    _c = _KANBAN_SOURCE_CHAT.get()
+                    if _p and _c:
+                        _current = (_p, _c)
+                except Exception:
+                    pass
                 if not _current:
                     try:
                         from gateway.session_context import get_session_env as _gse
@@ -892,7 +905,7 @@ def _handle_create(args: dict, **kw) -> str:
                         if _plat_env and _chat_env:
                             _current = (_plat_env, _chat_env)
                     except ImportError:
-                        pass  # not running in gateway context
+                        pass
                 if _current and new_tid:
                     _plat_s, _chat_s = _current
                     _notifier = os.environ.get("HERMES_PROFILE") or "default"
@@ -907,14 +920,6 @@ def _handle_create(args: dict, **kw) -> str:
                     # home channels (gateway injects these before each message).
                     try:
                         _all_hc = list(_kanban_all_home_channels)
-                        # Fallback to env var for home channels too
-                        if not _all_hc:
-                            _all_hc_env = os.environ.get("HERMES_KANBAN_ALL_HC")
-                            if _all_hc_env:
-                                import json as _json
-                                _parsed = _json.loads(_all_hc_env)
-                                if isinstance(_parsed, list):
-                                    _all_hc = _parsed
                         for _p, _hc in _all_hc:
                             if _p == _plat_s:
                                 continue
