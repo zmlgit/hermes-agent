@@ -1231,7 +1231,7 @@ def _handle_create(args: dict, **kw) -> str:
             )
             new_task = kb.get_task(conn, new_tid)
             # M2-4: goal_mode + verification.auto → auto-enable task loop.
-            # Write a task_loop_started event so the EpochEngine and
+            # Write a task_loop_started event so the TaskLoopEngine and
             # downstream consumers know this task entered the
             # verification closed-loop, not just the goal-turn budget.
             if should_auto_enable_task_loop(goal_mode, body):
