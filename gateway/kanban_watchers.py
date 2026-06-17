@@ -500,7 +500,7 @@ class TaskLoopEngine:
 
         This does NOT depend on kanban_notify_subs or kanban_board_subs —
         it scans the task tables directly. All connected home channels
-        receive the epoch decision push automatically.
+        receive the task-loop decision push automatically.
 
         Configuration (in config.yaml under ``kanban:``):
 
@@ -576,7 +576,7 @@ class TaskLoopEngine:
                     in_progress_count = len(tasks) if tasks else 0
                     ready_tasks = _kb.list_tasks(conn, status="ready")
                     ready_count = len(ready_tasks) if ready_tasks else 0
-                    # Check for recent terminal events since last epoch trigger.
+                    # Check for recent terminal events since last task-loop trigger.
                     # Uses per-board last_event_id to avoid re-triggering on
                     # old events. Falls back to 600s window on first run.
                     last_eid = self._last_event_id.get(slug, 0)
@@ -637,7 +637,7 @@ class TaskLoopEngine:
                 )
                 continue
 
-            # Trigger epoch when there are terminal events AND no ready tasks.
+            # Trigger task-loop when there are terminal events AND no ready tasks.
             # We allow triggering even with running tasks, because a running
             # task might be an auto-re-dispatch from a crash — the orchestrator
             # needs to know about the crash to decide next steps.
@@ -646,7 +646,7 @@ class TaskLoopEngine:
 
             # A board with 0 running tasks but also 0 ready and no recent
             # terminal events is simply idle — skip without counting as
-            # stale. Only trigger epoch when there's actually something
+            # stale. Only trigger task-loop when there's actually something
             # to act on (ready tasks to dispatch or terminal events to
             # react to).
             if not ready_count and not any_terminal:
@@ -716,7 +716,7 @@ class TaskLoopEngine:
 
             # Epoch counter tracks active work on this board. Reset when:
             # 1. Board is idle (no running/ready/blocked = workflow finished)
-            # 2. New terminal events arrived (fresh epoch budget per new event)
+            # 2. New terminal events arrived (fresh task-loop budget per new event)
             is_idle = (in_progress_count == 0 and ready_count == 0 and blocked_count == 0)
             if is_idle or any_terminal:
                 self._task_loop_counts[slug] = 0
@@ -724,7 +724,7 @@ class TaskLoopEngine:
             current_loop = self._task_loop_counts.get(slug, 0) + 1
 
             # ── M2-2/M2-3: Convergence detection ───────────────────
-            # Before injecting another epoch message, check whether the
+            # Before injecting another task-loop message, check whether the
             # board has converged.  If it has, write a task_loop_closed
             # event and skip the injection — the workflow is done.
             try:
@@ -756,7 +756,7 @@ class TaskLoopEngine:
                                 ) if recent_event_rows else 0,
                                 task_loop_id=f"{slug}:loop:{current_loop}",
                             )
-                        # Reset epoch counter — the board converged.
+                        # Reset task-loop counter — the board converged.
                         self._task_loop_counts[slug] = 0
                         self._cooldowns[slug] = now
                         # Update last_event_id so we don't re-process.
@@ -821,7 +821,7 @@ class TaskLoopEngine:
                         slug, sg_exc,
                     )
 
-            # Anti-loop: max epoch limit per "wave" — between terminal events,
+            # Anti-loop: max task-loop limit per "wave" — between terminal events,
             # cap orchestrator re-dispatch attempts to avoid hot-looping.
             if current_loop > MAX_LOOPS:
                 logger.info(
@@ -975,11 +975,11 @@ class TaskLoopEngine:
 
                     # Inject into session WITHOUT blocking the notifier loop.
                     # A synchronous await here would queue user messages behind
-                    # the epoch processing, causing multi-minute delays.
+                    # the task-loop processing, causing multi-minute delays.
                     # fire-and-forget lets the agent handle it asynchronously.
 
                     async def _task_loop_inject():
-                        """Process epoch injection and send combined response."""
+                        """Process task-loop injection and send combined response."""
                         try:
                             response_text = await gateway._handle_message(synthetic_event)
                         except Exception as exc:
@@ -1032,7 +1032,7 @@ class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
     # Lazy-initialised task-loop engine (replaces class-level mutable defaults).
-    # Renamed from ``_epoch_engine`` for terminology consistency. The old
+    # Renamed from ``_epoch_engine`` for task-loop terminology. The old
     # name is kept as a class attribute alias so any external reader still
     # works during the migration window.
     _task_loop_engine: Optional[TaskLoopEngine] = None
@@ -1259,7 +1259,7 @@ class GatewayKanbanWatchersMixin:
     # ---------------------------------------------------------------------
 
     def _scan_candidate_boards(self, allowlist) -> list:
-        """Discover boards to consider for epoch/loop detection.
+        """Discover boards to consider for task-loop detection.
 
         Honours ``allowlist`` when non-empty; otherwise enumerates every
         non-hidden board directory under ``~/.hermes/kanban/boards/`` plus
@@ -1283,7 +1283,7 @@ class GatewayKanbanWatchersMixin:
             candidates.append(_kb.DEFAULT_BOARD)
         return candidates
 
-    def _detect_epoch(
+    def _detect_task_loop(
         self,
         slug: str,
         deliveries: list,
@@ -1292,8 +1292,8 @@ class GatewayKanbanWatchersMixin:
         """Return a stats dict for *slug* if there's something to act on,
         otherwise ``None``.
 
-        The stats dict shape (used by :meth:`_build_epoch_message` and
-        :meth:`_inject_epoch`):
+        The stats dict shape (used by :meth:`_build_task_loop_message` and
+        :meth:`_inject_task_loop`):
 
         - ``in_progress_count`` / ``in_progress_names``
         - ``ready_count`` / ``blocked_count``
@@ -1524,7 +1524,7 @@ class GatewayKanbanWatchersMixin:
             )
             return []
 
-    def _build_epoch_message(
+    def _build_task_loop_message(
         self,
         slug: str,
         event_details: list,
@@ -1668,7 +1668,7 @@ class GatewayKanbanWatchersMixin:
             lines.append("7. Do NOT send messages to the user — results are delivered automatically")
         return "\n".join(lines)
 
-    async def _inject_epoch(
+    async def _inject_task_loop(
         self,
         msg_text: str,
         slug: str,
@@ -1740,7 +1740,7 @@ class GatewayKanbanWatchersMixin:
 
         For backward compatibility this method still delegates the
         legacy ``EpochEngine.tick`` body when called via the old
-        ``self.epoch_engine.tick(...)`` path — that path remains the
+        ``self.task_loop_engine.tick(...)`` path — that path remains the
         source of truth for the inner implementation while this method
         acts as the rule-based dispatcher for new code paths and tests.
         """
@@ -1756,7 +1756,7 @@ class GatewayKanbanWatchersMixin:
             logger.debug("kanban orchestrator: scan failed: %s", exc)
             return
 
-        # Cache max_loops so ``_detect_epoch`` can read it from stats.
+        # Cache max_loops so ``_detect_task_loop`` can read it from stats.
         try:
             cfg_max_loops = int(
                 kanban_cfg.get("orchestrator_max_loops")
@@ -1771,7 +1771,7 @@ class GatewayKanbanWatchersMixin:
         threshold = int(kanban_cfg.get("orchestrator_force_failure_threshold", 3))
 
         for slug in candidates:
-            stats = self._detect_epoch(
+            stats = self._detect_task_loop(
                 slug, deliveries, self.task_loop_engine._last_event_id,
             )
 
@@ -1781,7 +1781,7 @@ class GatewayKanbanWatchersMixin:
             # fire a final summary message to the coordinator so it
             # knows to wrap up.  This must run BEFORE the stats-None
             # short-circuit below: a fully converged board is
-            # precisely the case where _detect_epoch returns ``None``
+            # precisely the case where _detect_task_loop returns ``None``
             # (no ready/running/blocked, no recent terminal events).
             #
             # We deliberately do NOT use ``continue`` to skip the
@@ -1791,7 +1791,7 @@ class GatewayKanbanWatchersMixin:
             # work that would never come.  Convergence → inject.
             conv_metrics = self._board_converged(slug)
             if conv_metrics is not None:
-                # Build a minimal stats dict if _detect_epoch skipped
+                # Build a minimal stats dict if _detect_task_loop skipped
                 # this board (the all-done quiescent case).
                 if stats is None:
                     stats = {
@@ -1815,7 +1815,7 @@ class GatewayKanbanWatchersMixin:
                 stats["force_urgent"] = False
                 stats["force_failure_threshold"] = threshold
                 stats["failing_task_ids"] = []
-                msg_text = self._build_epoch_message(
+                msg_text = self._build_task_loop_message(
                     slug, stats["event_details"], stats,
                 )
                 logger.info(
@@ -1827,7 +1827,7 @@ class GatewayKanbanWatchersMixin:
                     conv_metrics.get("blocked_ratio", 0.0),
                     conv_metrics.get("resolve_rate", 0.0),
                 )
-                _coro_or_call = self._inject_epoch(msg_text, slug, stats)
+                _coro_or_call = self._inject_task_loop(msg_text, slug, stats)
                 if asyncio.iscoroutine(_coro_or_call):
                     asyncio.ensure_future(_coro_or_call)
                 # Update cursor + cooldown so we don't re-fire on the
@@ -1870,13 +1870,13 @@ class GatewayKanbanWatchersMixin:
             stats["failing_task_ids"] = failing_ids
 
             # Build the message and inject.
-            msg_text = self._build_epoch_message(slug, stats["event_details"], stats)
-            # Tests inject a synchronous ``_inject_epoch`` recorder via
-            # ``patch.object(runner, "_inject_epoch", ...)`` — keep the
+            msg_text = self._build_task_loop_message(slug, stats["event_details"], stats)
+            # Tests inject a synchronous ``_inject_task_loop`` recorder via
+            # ``patch.object(runner, "_inject_task_loop", ...)`` — keep the
             # call fire-and-forget so the recorded method (sync or async)
             # is what executes.  ``ensure_future`` accepts both coroutines
             # and plain callables, so the sync test double gets called.
-            _coro_or_call = self._inject_epoch(msg_text, slug, stats)
+            _coro_or_call = self._inject_task_loop(msg_text, slug, stats)
             if asyncio.iscoroutine(_coro_or_call):
                 asyncio.ensure_future(_coro_or_call)
 
@@ -2265,7 +2265,7 @@ class GatewayKanbanWatchersMixin:
                             await asyncio.to_thread(
                                 self._kanban_unsub, sub, board_slug,
                             )
-                # ── Orchestrator epoch callback ────────────────────────
+                # ── Orchestrator task-loop callback ────────────────────────
                 # Runs once per tick, independent of whether there were
                 # any deliveries. Fire-and-forget so it doesn't block
                 # the notifier loop (and thus user message delivery).

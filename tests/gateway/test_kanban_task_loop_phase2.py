@@ -1,6 +1,6 @@
-"""Phase 2 epoch-callback conditional trigger tests.
+"""Phase 2 task-loop callback conditional trigger tests.
 
-The orchestrator epoch callback used to fire on every tick that had
+The orchestrator task-loop callback used to fire on every tick that had
 any "interesting" state (ready cards, terminal events, etc.). Phase 2
 narrows the trigger so:
 
@@ -24,7 +24,7 @@ SQLite path with a real tmp DB.
 
 Run:
   cd /home/zml/workspace/hermes-agent
-  venv/bin/python -m pytest tests/gateway/test_kanban_epoch_phase2.py -v
+  venv/bin/python -m pytest tests/gateway/test_kanban_task_loop_phase2.py -v
 """
 from __future__ import annotations
 
@@ -53,17 +53,17 @@ def _make_runner_with_mocks():
             }
             self.injected_events = []
             self.send_calls = []
-            # Captured call to _inject_epoch (called by callback when
+            # Captured call to _inject_task_loop (called by callback when
             # trigger condition is met) so we can assert the trigger
             # fired or skipped without running the actual agent.
-            self.inject_epoch_calls = []
+            self.inject_task_loop_calls = []
 
         async def _handle_message(self, ev):
             self.injected_events.append(ev)
             return None
 
-        def _inject_epoch(self, msg_text, slug, stats):
-            self.inject_epoch_calls.append({
+        def _inject_task_loop(self, msg_text, slug, stats):
+            self.inject_task_loop_calls.append({
                 "msg_text": msg_text,
                 "slug": slug,
                 "stats": stats,
@@ -79,11 +79,11 @@ def _stats(
     in_progress_names=None,
     event_details=None,
     has_terminal_events: bool = False,
-    current_epoch: int = 1,
-    MAX_EPOCHS: int = 10,
+    current_loop: int = 1,
+    MAX_LOOPS: int = 10,
     blocked_count: int = 0,
 ):
-    """Build the stats dict shape that ``_detect_epoch`` returns."""
+    """Build the stats dict shape that ``_detect_task_loop`` returns."""
     return {
         "in_progress_count": in_progress_count,
         "in_progress_names": list(in_progress_names or []),
@@ -91,8 +91,8 @@ def _stats(
         "blocked_count": blocked_count,
         "event_details": list(event_details or []),
         "has_terminal_events": has_terminal_events,
-        "current_epoch": current_epoch,
-        "MAX_EPOCHS": MAX_EPOCHS,
+        "current_loop": current_loop,
+        "MAX_LOOPS": MAX_LOOPS,
         "max_eid": 0,
     }
 
@@ -114,7 +114,7 @@ async def test_rule1_skips_when_ready_nonempty_and_no_terminal_events():
     with patch.object(
         runner, "_scan_candidate_boards", return_value=["test-board"],
     ), patch.object(
-        runner, "_detect_epoch", return_value=stats,
+        runner, "_detect_task_loop", return_value=stats,
     ), patch.object(
         runner, "_has_force_failure", return_value=False,
     ), patch.object(
@@ -122,7 +122,7 @@ async def test_rule1_skips_when_ready_nonempty_and_no_terminal_events():
     ):
         await runner._kanban_orchestrator_callback([], {"orchestrator_notify": True})
 
-    assert runner.inject_epoch_calls == [], (
+    assert runner.inject_task_loop_calls == [], (
         "rule 1: ready non-empty + no terminal + no force failure "
         "must skip injection"
     )
@@ -148,7 +148,7 @@ async def test_rule2_fires_when_ready_empty_and_terminal_events():
     with patch.object(
         runner, "_scan_candidate_boards", return_value=["test-board"],
     ), patch.object(
-        runner, "_detect_epoch", return_value=stats,
+        runner, "_detect_task_loop", return_value=stats,
     ), patch.object(
         runner, "_has_force_failure", return_value=False,
     ), patch.object(
@@ -156,10 +156,10 @@ async def test_rule2_fires_when_ready_empty_and_terminal_events():
     ):
         await runner._kanban_orchestrator_callback([], {"orchestrator_notify": True})
 
-    assert len(runner.inject_epoch_calls) == 1, (
+    assert len(runner.inject_task_loop_calls) == 1, (
         "rule 2: empty ready + terminal events must fire"
     )
-    call = runner.inject_epoch_calls[0]
+    call = runner.inject_task_loop_calls[0]
     assert call["slug"] == "test-board"
     assert call["stats"]["force_urgent"] is False
     assert "[URGENT]" not in call["msg_text"]
@@ -179,7 +179,7 @@ async def test_rule3_force_fires_when_consecutive_failures_exceeded():
     with patch.object(
         runner, "_scan_candidate_boards", return_value=["test-board"],
     ), patch.object(
-        runner, "_detect_epoch", return_value=stats,
+        runner, "_detect_task_loop", return_value=stats,
     ), patch.object(
         runner, "_has_force_failure", return_value=True,
     ), patch.object(
@@ -196,10 +196,10 @@ async def test_rule3_force_fires_when_consecutive_failures_exceeded():
             },
         )
 
-    assert len(runner.inject_epoch_calls) == 1, (
+    assert len(runner.inject_task_loop_calls) == 1, (
         "rule 3: force-failure must trigger even when ready queue is full"
     )
-    call = runner.inject_epoch_calls[0]
+    call = runner.inject_task_loop_calls[0]
     assert call["slug"] == "test-board"
     assert call["stats"]["force_urgent"] is True
     assert call["stats"]["force_failure_threshold"] == 3
@@ -235,7 +235,7 @@ async def test_rule3_force_fires_with_terminal_events_too():
     with patch.object(
         runner, "_scan_candidate_boards", return_value=["test-board"],
     ), patch.object(
-        runner, "_detect_epoch", return_value=stats,
+        runner, "_detect_task_loop", return_value=stats,
     ), patch.object(
         runner, "_has_force_failure", return_value=True,
     ), patch.object(
@@ -246,8 +246,8 @@ async def test_rule3_force_fires_with_terminal_events_too():
     ):
         await runner._kanban_orchestrator_callback([], {"orchestrator_notify": True})
 
-    assert len(runner.inject_epoch_calls) == 1
-    call = runner.inject_epoch_calls[0]
+    assert len(runner.inject_task_loop_calls) == 1
+    call = runner.inject_task_loop_calls[0]
     assert call["stats"]["force_urgent"] is True
     assert call["stats"]["failing_task_ids"] == ["t_loop_loop"]
 
@@ -255,14 +255,14 @@ async def test_rule3_force_fires_with_terminal_events_too():
 @pytest.mark.asyncio
 async def test_no_force_no_terminal_and_no_ready_returns_none_skip():
     """A board that is truly idle (no ready, no terminal events, no
-    failing tasks) must still skip — _detect_epoch returns None in
+    failing tasks) must still skip — _detect_task_loop returns None in
     that case and we never even reach the force-failure probe."""
     runner = _make_runner_with_mocks()
 
-    with patch.object(runner, "_detect_epoch", return_value=None):
+    with patch.object(runner, "_detect_task_loop", return_value=None):
         await runner._kanban_orchestrator_callback([], {"orchestrator_notify": True})
 
-    assert runner.inject_epoch_calls == []
+    assert runner.inject_task_loop_calls == []
 
 
 @pytest.mark.asyncio
@@ -279,7 +279,7 @@ async def test_force_failure_threshold_from_config():
     with patch.object(
         runner, "_scan_candidate_boards", return_value=["test-board"],
     ), patch.object(
-        runner, "_detect_epoch", return_value=stats,
+        runner, "_detect_task_loop", return_value=stats,
     ), patch.object(
         runner, "_has_force_failure", return_value=True,
     ), patch.object(
@@ -295,7 +295,7 @@ async def test_force_failure_threshold_from_config():
             },
         )
 
-    assert runner.inject_epoch_calls[0]["stats"]["force_failure_threshold"] == 5
+    assert runner.inject_task_loop_calls[0]["stats"]["force_failure_threshold"] == 5
 
 
 # --- _has_force_failure unit tests (real DB) -------------------------------
@@ -433,8 +433,8 @@ def test_failing_task_ids_returns_empty_on_db_error():
 # --- message builder -------------------------------------------------------
 
 
-def test_build_epoch_message_omits_urgent_when_normal():
-    """Non-urgent epochs must NOT carry the [URGENT] prefix or the
+def test_build_task_loop_message_omits_urgent_when_normal():
+    """Non-urgent task-loop cycles must NOT carry the [URGENT] prefix or the
     Stuck tasks line."""
     runner = _make_runner_with_mocks()
     stats = _stats(
@@ -450,12 +450,12 @@ def test_build_epoch_message_omits_urgent_when_normal():
     )
     stats["auto_completed"] = []
     stats["force_urgent"] = False
-    msg = runner._build_epoch_message("test-board", stats["event_details"], stats)
+    msg = runner._build_task_loop_message("test-board", stats["event_details"], stats)
     assert "[URGENT]" not in msg
     assert "Stuck tasks" not in msg
 
 
-def test_build_epoch_message_includes_urgent_when_force_triggered():
+def test_build_task_loop_message_includes_urgent_when_force_triggered():
     runner = _make_runner_with_mocks()
     stats = _stats(
         ready_count=2,
@@ -466,7 +466,7 @@ def test_build_epoch_message_includes_urgent_when_force_triggered():
     stats["force_urgent"] = True
     stats["force_failure_threshold"] = 3
     stats["failing_task_ids"] = ["t_loop_001", "t_loop_002"]
-    msg = runner._build_epoch_message("test-board", stats["event_details"], stats)
+    msg = runner._build_task_loop_message("test-board", stats["event_details"], stats)
     assert msg.startswith("[URGENT]")
     assert "Stuck tasks (>= 3 failures)" in msg
     assert "t_loop_001" in msg and "t_loop_002" in msg
@@ -474,7 +474,7 @@ def test_build_epoch_message_includes_urgent_when_force_triggered():
     assert "Triage the stuck tasks first" in msg
 
 
-def test_build_epoch_message_truncates_long_failing_lists():
+def test_build_task_loop_message_truncates_long_failing_lists():
     """The stuck-tasks preview is bounded to 8 ids to keep the message
     under control — anything past that gets a `(+N more)` suffix."""
     runner = _make_runner_with_mocks()
@@ -484,7 +484,7 @@ def test_build_epoch_message_truncates_long_failing_lists():
     stats["force_urgent"] = True
     stats["force_failure_threshold"] = 3
     stats["failing_task_ids"] = failing
-    msg = runner._build_epoch_message("test-board", stats["event_details"], stats)
+    msg = runner._build_task_loop_message("test-board", stats["event_details"], stats)
     for tid in failing[:8]:
         assert tid in msg
     assert "(+7 more)" in msg
@@ -525,19 +525,19 @@ def _fake_converged_metrics(
 async def test_convergence_injects_final_summary_when_board_fully_done():
     """When the board is fully converged (all tasks done, no pending,
     no recent failures), the orchestrator callback must inject a
-    final summary message — even when ``_detect_epoch`` returns
+    final summary message — even when ``_detect_task_loop`` returns
     ``None`` because there's no recent activity.  This is the bug
     T0/t_aed127cf fixes: previously convergence wrote a DB event but
     never told the coordinator.
     """
     runner = _make_runner_with_mocks()
-    # _detect_epoch returns None for the "all-done quiescent" case.
+    # _detect_task_loop returns None for the "all-done quiescent" case.
     metrics = _fake_converged_metrics(resolved=5, total=5)
 
     with patch.object(
         runner, "_scan_candidate_boards", return_value=["test-board"],
     ), patch.object(
-        runner, "_detect_epoch", return_value=None,
+        runner, "_detect_task_loop", return_value=None,
     ), patch.object(
         runner, "_board_converged", return_value=metrics,
     ), patch.object(
@@ -547,10 +547,10 @@ async def test_convergence_injects_final_summary_when_board_fully_done():
             [], {"orchestrator_notify": True},
         )
 
-    assert len(runner.inject_epoch_calls) == 1, (
-        "convergence must trigger exactly one _inject_epoch call"
+    assert len(runner.inject_task_loop_calls) == 1, (
+        "convergence must trigger exactly one _inject_task_loop call"
     )
-    call = runner.inject_epoch_calls[0]
+    call = runner.inject_task_loop_calls[0]
     assert call["slug"] == "test-board"
     # Convergence marker must be propagated through stats so the
     # message builder uses the dedicated convergence branch.
@@ -569,8 +569,8 @@ async def test_convergence_injects_final_summary_when_board_fully_done():
 
 
 @pytest.mark.asyncio
-async def test_convergence_injects_even_when_detect_epoch_returns_stats():
-    """If ``_detect_epoch`` already produced a stats dict (e.g. recent
+async def test_convergence_injects_even_when_detect_task_loop_returns_stats():
+    """If ``_detect_task_loop`` already produced a stats dict (e.g. recent
     terminal events from final tasks), convergence must still fire
     and override Rule 1 / Rule 3 — the converged message is more
     important than normal loop bookkeeping.
@@ -592,7 +592,7 @@ async def test_convergence_injects_even_when_detect_epoch_returns_stats():
     with patch.object(
         runner, "_scan_candidate_boards", return_value=["test-board"],
     ), patch.object(
-        runner, "_detect_epoch", return_value=stats,
+        runner, "_detect_task_loop", return_value=stats,
     ), patch.object(
         runner, "_board_converged", return_value=metrics,
     ), patch.object(
@@ -602,8 +602,8 @@ async def test_convergence_injects_even_when_detect_epoch_returns_stats():
             [], {"orchestrator_notify": True},
         )
 
-    assert len(runner.inject_epoch_calls) == 1
-    call = runner.inject_epoch_calls[0]
+    assert len(runner.inject_task_loop_calls) == 1
+    call = runner.inject_task_loop_calls[0]
     assert call["stats"]["converged"] is True
     msg = call["msg_text"]
     # Convergence path uses the dedicated branch — no [URGENT] prefix,
@@ -628,7 +628,7 @@ async def test_convergence_skips_when_board_not_converged():
     with patch.object(
         runner, "_scan_candidate_boards", return_value=["test-board"],
     ), patch.object(
-        runner, "_detect_epoch", return_value=stats,
+        runner, "_detect_task_loop", return_value=stats,
     ), patch.object(
         runner, "_board_converged", return_value=None,
     ), patch.object(
@@ -643,16 +643,16 @@ async def test_convergence_skips_when_board_not_converged():
     # The regular Rule 2 path should still fire (terminal events
     # present, no ready cards blocking the trigger).  Crucially, the
     # message must NOT carry the convergence marker.
-    assert len(runner.inject_epoch_calls) == 1
-    call = runner.inject_epoch_calls[0]
+    assert len(runner.inject_task_loop_calls) == 1
+    call = runner.inject_task_loop_calls[0]
     assert call["stats"].get("converged") is None or call["stats"].get("converged") is False
     msg = call["msg_text"]
     assert "📋" not in msg
     assert "所有任务已完成" not in msg
 
 
-def test_build_epoch_message_convergence_branch_includes_metrics():
-    """The convergence branch in ``_build_epoch_message`` must render
+def test_build_task_loop_message_convergence_branch_includes_metrics():
+    """The convergence branch in ``_build_task_loop_message`` must render
     the metrics in a way the coordinator can act on: resolved/total
     ratio, blocked_ratio, resolve_rate, recent activity counts, and
     the wrap-up instruction.
@@ -667,7 +667,7 @@ def test_build_epoch_message_convergence_branch_includes_metrics():
     stats["force_urgent"] = False
     stats["failing_task_ids"] = []
 
-    msg = runner._build_epoch_message("alpha-board", stats["event_details"], stats)
+    msg = runner._build_task_loop_message("alpha-board", stats["event_details"], stats)
     # Header
     assert msg.startswith("📋 Kanban Board \"alpha-board\" — 全部完成")
     # Metrics line
