@@ -1423,6 +1423,33 @@ class GatewayKanbanWatchersMixin:
             )
             return False
 
+    def _board_converged(self, board_slug: str) -> Optional[dict]:
+        """Return the convergence ``metrics`` dict for *board_slug* if the
+        board has converged, otherwise ``None``.
+
+        Thin wrapper around :func:`compute_board_convergence` that
+        handles the DB connection + exception quarantine. Returning the
+        full metrics dict (not just a bool) gives the caller access to
+        ``resolved``/``total_tasks``/``blocked_ratio``/``resolve_rate``
+        for the summary message.  ``None`` on any error so a transient
+        DB glitch never causes a spurious convergence injection.
+        """
+        try:
+            from hermes_cli import kanban_db as _kb
+
+            conn = _kb.connect(board=board_slug)
+            try:
+                metrics = compute_board_convergence(conn)
+            finally:
+                conn.close()
+            return metrics if metrics.get("converged") else None
+        except Exception as exc:
+            logger.debug(
+                "kanban task_loop convergence probe failed for %s: %s",
+                board_slug, exc,
+            )
+            return None
+
     def _failing_task_ids(self, board_slug: str, threshold: int) -> list:
         """Return ids of non-terminal tasks with
         ``consecutive_failures >= threshold``, sorted by failure count
@@ -1509,6 +1536,12 @@ class GatewayKanbanWatchersMixin:
         ``stats['force_urgent']`` is true, otherwise without a prefix.
         Includes a "Stuck tasks" line when there are failing task ids,
         truncated to 8 ids with a ``(+N more)`` suffix.
+
+        When ``stats['converged']`` is true, emits a dedicated
+        convergence-summary message: 📋 header, resolved/total ratio,
+        blocked/resolve rate metrics, and an explicit "all tasks
+        complete — wrap up" instruction to the coordinator.  This
+        branch takes precedence over the urgent/loop formatting.
         """
         force_urgent = bool(stats.get("force_urgent"))
         threshold = stats.get("force_failure_threshold", 3)
@@ -1520,6 +1553,40 @@ class GatewayKanbanWatchersMixin:
         auto_completed = list(stats.get("auto_completed") or [])
 
         lines: list = []
+
+        # Convergence path — board finished, tell the coordinator to wrap up.
+        if stats.get("converged"):
+            metrics = stats.get("convergence_metrics") or {}
+            resolved = int(metrics.get("resolved") or 0)
+            total = int(metrics.get("total_tasks") or 0)
+            blocked_ratio = float(metrics.get("blocked_ratio") or 0.0)
+            resolve_rate = float(metrics.get("resolve_rate") or 0.0)
+            lines.append(
+                f"📋 Kanban Board \"{slug}\" — 全部完成"
+            )
+            lines.append(
+                f"Progress: {resolved}/{total} resolved "
+                f"(resolve_rate={resolve_rate:.0%}, "
+                f"blocked_ratio={blocked_ratio:.0%})"
+            )
+            vf = int(metrics.get("verification_failed") or 0)
+            new_tasks = int(metrics.get("new_tasks_created") or 0)
+            if vf or new_tasks:
+                lines.append(
+                    f"Recent activity window: "
+                    f"verification_failed={vf}, remediation_created={new_tasks}"
+                )
+            if auto_completed:
+                lines.append(
+                    f"Auto-completed parents: {', '.join(auto_completed)}"
+                )
+            lines.append("")
+            lines.append("--- Orchestrator Instructions ---")
+            lines.append(
+                "所有任务已完成。请总结全部产出，通知用户，然后 complete 自己的 orchestrator 任务。"
+            )
+            return "\n".join(lines)
+
         if force_urgent:
             lines.append(f"[URGENT] Board '{slug}' has stuck tasks (≥ {threshold} failures).")
         else:
@@ -1707,6 +1774,72 @@ class GatewayKanbanWatchersMixin:
             stats = self._detect_epoch(
                 slug, deliveries, self.task_loop_engine._last_event_id,
             )
+
+            # ── Convergence detection ───────────────────────────────
+            # When the board has fully converged (all work done, no
+            # pending, no recent failures, no remediation in flight),
+            # fire a final summary message to the coordinator so it
+            # knows to wrap up.  This must run BEFORE the stats-None
+            # short-circuit below: a fully converged board is
+            # precisely the case where _detect_epoch returns ``None``
+            # (no ready/running/blocked, no recent terminal events).
+            #
+            # We deliberately do NOT use ``continue`` to skip the
+            # injection — the previous behaviour wrote a
+            # ``task_loop_closed`` event but never told the
+            # orchestrator, so the coordinator sat idle waiting for
+            # work that would never come.  Convergence → inject.
+            conv_metrics = self._board_converged(slug)
+            if conv_metrics is not None:
+                # Build a minimal stats dict if _detect_epoch skipped
+                # this board (the all-done quiescent case).
+                if stats is None:
+                    stats = {
+                        "in_progress_count": 0,
+                        "in_progress_names": [],
+                        "ready_count": 0,
+                        "blocked_count": 0,
+                        "event_details": [],
+                        "has_terminal_events": False,
+                        "current_loop": int(
+                            self.task_loop_engine._task_loop_counts.get(slug, 0)
+                        ) + 1,
+                        "MAX_LOOPS": cfg_max_loops,
+                        "max_eid": 0,
+                    }
+                stats["converged"] = True
+                stats["convergence_metrics"] = conv_metrics
+                stats["auto_completed"] = (
+                    self._auto_complete_parents(slug)
+                )
+                stats["force_urgent"] = False
+                stats["force_failure_threshold"] = threshold
+                stats["failing_task_ids"] = []
+                msg_text = self._build_epoch_message(
+                    slug, stats["event_details"], stats,
+                )
+                logger.info(
+                    "kanban orchestrator callback: board %s converged "
+                    "(resolved=%d/%d, blocked_ratio=%.2f, "
+                    "resolve_rate=%.2f) — injecting final summary",
+                    slug, conv_metrics.get("resolved", 0),
+                    conv_metrics.get("total_tasks", 0),
+                    conv_metrics.get("blocked_ratio", 0.0),
+                    conv_metrics.get("resolve_rate", 0.0),
+                )
+                _coro_or_call = self._inject_epoch(msg_text, slug, stats)
+                if asyncio.iscoroutine(_coro_or_call):
+                    asyncio.ensure_future(_coro_or_call)
+                # Update cursor + cooldown so we don't re-fire on the
+                # same convergence.  Continue to the next slug.
+                self.task_loop_engine._last_event_id[slug] = max(
+                    int(self.task_loop_engine._last_event_id.get(slug, 0)),
+                    int(stats.get("max_eid") or 0),
+                )
+                self.task_loop_engine._cooldowns[slug] = time.monotonic()
+                self.task_loop_engine._stale_counts[slug] = 0
+                continue
+
             if stats is None:
                 continue  # nothing to act on
 

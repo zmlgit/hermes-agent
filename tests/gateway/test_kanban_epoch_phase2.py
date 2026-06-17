@@ -490,3 +490,197 @@ def test_build_epoch_message_truncates_long_failing_lists():
     assert "(+7 more)" in msg
     for tid in failing[8:]:
         assert tid not in msg
+
+
+# --- convergence injection (T0: t_aed127cf) -------------------------------
+
+
+def _fake_converged_metrics(
+    resolved: int = 5,
+    total: int = 5,
+    blocked_ratio: float = 0.0,
+    resolve_rate: float = 1.0,
+    vf: int = 0,
+    new_tasks: int = 0,
+) -> dict:
+    """Build a fake ``compute_board_convergence`` metrics dict with
+    ``converged=True``.  Matches the real function's output shape so
+    the message builder renders metrics correctly.
+    """
+    return {
+        "total_tasks": total,
+        "resolved": resolved,
+        "blocked": 0,
+        "running": 0,
+        "ready": 0,
+        "blocked_ratio": blocked_ratio,
+        "resolve_rate": resolve_rate,
+        "new_tasks_created": new_tasks,
+        "verification_failed": vf,
+        "converged": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_convergence_injects_final_summary_when_board_fully_done():
+    """When the board is fully converged (all tasks done, no pending,
+    no recent failures), the orchestrator callback must inject a
+    final summary message — even when ``_detect_epoch`` returns
+    ``None`` because there's no recent activity.  This is the bug
+    T0/t_aed127cf fixes: previously convergence wrote a DB event but
+    never told the coordinator.
+    """
+    runner = _make_runner_with_mocks()
+    # _detect_epoch returns None for the "all-done quiescent" case.
+    metrics = _fake_converged_metrics(resolved=5, total=5)
+
+    with patch.object(
+        runner, "_scan_candidate_boards", return_value=["test-board"],
+    ), patch.object(
+        runner, "_detect_epoch", return_value=None,
+    ), patch.object(
+        runner, "_board_converged", return_value=metrics,
+    ), patch.object(
+        runner, "_auto_complete_parents", return_value=[],
+    ):
+        await runner._kanban_orchestrator_callback(
+            [], {"orchestrator_notify": True},
+        )
+
+    assert len(runner.inject_epoch_calls) == 1, (
+        "convergence must trigger exactly one _inject_epoch call"
+    )
+    call = runner.inject_epoch_calls[0]
+    assert call["slug"] == "test-board"
+    # Convergence marker must be propagated through stats so the
+    # message builder uses the dedicated convergence branch.
+    assert call["stats"]["converged"] is True
+    assert call["stats"]["convergence_metrics"] == metrics
+    # The injected message must include convergence content.
+    msg = call["msg_text"]
+    assert "📋" in msg, f"convergence msg must have 📋 header; got: {msg!r}"
+    assert "5/5" in msg, (
+        f"convergence msg must report resolved/total; got: {msg!r}"
+    )
+    assert "resolve_rate=100%" in msg
+    # The wrap-up instruction must be present.
+    assert "所有任务已完成" in msg
+    assert "complete 自己的 orchestrator 任务" in msg
+
+
+@pytest.mark.asyncio
+async def test_convergence_injects_even_when_detect_epoch_returns_stats():
+    """If ``_detect_epoch`` already produced a stats dict (e.g. recent
+    terminal events from final tasks), convergence must still fire
+    and override Rule 1 / Rule 3 — the converged message is more
+    important than normal loop bookkeeping.
+    """
+    runner = _make_runner_with_mocks()
+    stats = _stats(
+        ready_count=0,
+        has_terminal_events=True,
+        event_details=[{
+            "task_id": "t_last_one",
+            "kind": "completed",
+            "title": "final task",
+            "assignee": "coder",
+            "summary": "shipped",
+        }],
+    )
+    metrics = _fake_converged_metrics(resolved=3, total=3)
+
+    with patch.object(
+        runner, "_scan_candidate_boards", return_value=["test-board"],
+    ), patch.object(
+        runner, "_detect_epoch", return_value=stats,
+    ), patch.object(
+        runner, "_board_converged", return_value=metrics,
+    ), patch.object(
+        runner, "_auto_complete_parents", return_value=[],
+    ):
+        await runner._kanban_orchestrator_callback(
+            [], {"orchestrator_notify": True},
+        )
+
+    assert len(runner.inject_epoch_calls) == 1
+    call = runner.inject_epoch_calls[0]
+    assert call["stats"]["converged"] is True
+    msg = call["msg_text"]
+    # Convergence path uses the dedicated branch — no [URGENT] prefix,
+    # no "Workers idle" header.
+    assert "[URGENT]" not in msg
+    assert "Workers idle" not in msg
+    assert "📋" in msg
+    assert "3/3" in msg
+
+
+@pytest.mark.asyncio
+async def test_convergence_skips_when_board_not_converged():
+    """If ``_board_converged`` returns ``None``, the convergence branch
+    must NOT inject — the regular rules (Rule 1, Rule 2, Rule 3)
+    decide whether to fire.  This is the negative-control case: a
+    board that still has work in progress or recent verification
+    failures must not be told "all done" prematurely.
+    """
+    runner = _make_runner_with_mocks()
+    stats = _stats(ready_count=1, has_terminal_events=True, event_details=[])
+
+    with patch.object(
+        runner, "_scan_candidate_boards", return_value=["test-board"],
+    ), patch.object(
+        runner, "_detect_epoch", return_value=stats,
+    ), patch.object(
+        runner, "_board_converged", return_value=None,
+    ), patch.object(
+        runner, "_has_force_failure", return_value=False,
+    ), patch.object(
+        runner, "_auto_complete_parents", return_value=[],
+    ):
+        await runner._kanban_orchestrator_callback(
+            [], {"orchestrator_notify": True},
+        )
+
+    # The regular Rule 2 path should still fire (terminal events
+    # present, no ready cards blocking the trigger).  Crucially, the
+    # message must NOT carry the convergence marker.
+    assert len(runner.inject_epoch_calls) == 1
+    call = runner.inject_epoch_calls[0]
+    assert call["stats"].get("converged") is None or call["stats"].get("converged") is False
+    msg = call["msg_text"]
+    assert "📋" not in msg
+    assert "所有任务已完成" not in msg
+
+
+def test_build_epoch_message_convergence_branch_includes_metrics():
+    """The convergence branch in ``_build_epoch_message`` must render
+    the metrics in a way the coordinator can act on: resolved/total
+    ratio, blocked_ratio, resolve_rate, recent activity counts, and
+    the wrap-up instruction.
+    """
+    runner = _make_runner_with_mocks()
+    stats = _stats(ready_count=0, has_terminal_events=False, event_details=[])
+    stats["converged"] = True
+    stats["convergence_metrics"] = _fake_converged_metrics(
+        resolved=7, total=10, blocked_ratio=0.1, resolve_rate=0.7, vf=1, new_tasks=0,
+    )
+    stats["auto_completed"] = []
+    stats["force_urgent"] = False
+    stats["failing_task_ids"] = []
+
+    msg = runner._build_epoch_message("alpha-board", stats["event_details"], stats)
+    # Header
+    assert msg.startswith("📋 Kanban Board \"alpha-board\" — 全部完成")
+    # Metrics line
+    assert "7/10" in msg
+    assert "resolve_rate=70%" in msg
+    assert "blocked_ratio=10%" in msg
+    # Recent activity only when nonzero
+    assert "verification_failed=1" in msg
+    # Wrap-up instructions
+    assert "--- Orchestrator Instructions ---" in msg
+    assert "所有任务已完成" in msg
+    assert "complete 自己的 orchestrator 任务" in msg
+    # Convergence path must not include loop-counter or stuck-task
+    # formatting from the normal branch.
+    assert "[Kanban Task Loop" not in msg
+    assert "Stuck tasks" not in msg
