@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from typing import Any, Optional
 
 from tools.registry import registry, tool_error
@@ -38,17 +39,99 @@ from tools.registry import registry, tool_error
 logger = logging.getLogger(__name__)
 
 
-# Module-level dict: records the last (platform, chat_id) that invoked
-# each kanban board. Written by kanban tool handlers via _connect(),
-# read by gateway epoch callback to route notifications.
-# Key = board slug, Value = (platform_str, chat_id).
-# Gateway sets the current source before each _handle_message.
-_kanban_board_sources: dict[str, tuple[str, str]] = {}
-_kanban_current_source: tuple[str, str] | None = None
-# Gateway sets this to [(platform_str, chat_id), ...] for all connected
-# adapters' home channels before each _handle_message, so kanban_create
-# can auto-subscribe cross-platform (not just the current source).
-_kanban_all_home_channels: list[tuple[str, str]] = []
+class _BoardSourceRegistry:
+    """Thread-safe per-board ``(platform, chat_id)`` source registry.
+
+    Replaces the bare module-level ``dict`` that was the source of
+    Bug #1 (concurrent-write leakage): two dispatcher sessions writing
+    the same board slug could interleave and leave the dict in a torn
+    state. Every access is now guarded by a lock so concurrent
+    ``_connect()`` writes from parallel workers never corrupt each other.
+
+    The registry maps board slug → last ``(platform_str, chat_id)`` that
+    operated the board. Last-write-wins per slug is the *intended*
+    semantic: the most recent active session is the one the epoch
+    callback should route notifications to. Different slugs never
+    collide, so two workers on two boards are fully isolated.
+    """
+
+    def __init__(self) -> None:
+        self._sources: dict[str, tuple[str, str]] = {}
+        self._lock = threading.Lock()
+
+    def set(self, board: str, platform: str, chat_id: str) -> None:
+        with self._lock:
+            self._sources[board] = (platform, chat_id)
+
+    def get(self, board: str) -> Optional[tuple[str, str]]:
+        with self._lock:
+            return self._sources.get(board)
+
+    def clear(self, board: Optional[str] = None) -> None:
+        with self._lock:
+            if board is None:
+                self._sources.clear()
+            else:
+                self._sources.pop(board, None)
+
+    def snapshot(self) -> dict[str, tuple[str, str]]:
+        """Return a shallow copy (safe to iterate outside the lock)."""
+        with self._lock:
+            return dict(self._sources)
+
+
+# Module-level singleton. Written by kanban tool handlers via _connect()
+# (reading the per-session ContextVar), read by the gateway epoch callback
+# via resolve_board_source() to route notifications.
+_board_source_registry = _BoardSourceRegistry()
+# Backward-compat alias for any out-of-tree code that still reads the old
+# bare-dict name. It is NOT a dict — access goes through the registry's
+# thread-safe methods. The epoch callback and _connect() use the registry
+# directly; this alias only exists so a stray ``_kt._kanban_board_sources``
+# reference doesn't AttributeError at import time.
+_kanban_board_sources = _board_source_registry
+
+
+def resolve_board_source(slug: str) -> Optional[tuple[str, str]]:
+    """Unified source resolution for epoch-notification routing.
+
+    Returns ``(platform_str, chat_id)`` for *slug*, or ``None`` when no
+    source can be determined.  Lookup order:
+
+    1. **In-memory last-interaction source** — set by :func:`_connect`
+       when a kanban *write* tool (create/complete/block) is invoked.
+       This records which session last operated the board.
+    2. **Board notify subscription** — falls back to the first row in
+       ``kanban_notify_subs`` for the board, so boards that were set up
+       via ``/kanban create`` but never had a tool write still route
+       correctly.
+
+    This replaces the dual-path inline lookup that previously lived in
+    the epoch callback (Bug #3) and the ``_kanban_last_user_source``
+    alias in run.py (Bug #4).
+    """
+    # Primary: in-memory last-interaction source (thread-safe registry).
+    src = _board_source_registry.get(slug)
+    if src and src[0]:
+        return src
+
+    # Fallback: board's active notify subscription.
+    try:
+        from hermes_cli import kanban_db as kb
+        conn = kb.connect(board=slug)
+        try:
+            subs = kb.list_notify_subs(conn)
+            if subs:
+                s = subs[0]
+                sp = (s.get("platform") or "").lower()
+                sch = s.get("chat_id") or ""
+                if sp and sch:
+                    return (sp, sch)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -194,28 +277,23 @@ def _connect(board: Optional[str] = None, *, update_source: bool = False):
     if update_source:
         try:
             resolved = kb.get_current_board() if not board else board
-            import tools.kanban_tools as _kt
-            if _kt._kanban_current_source and resolved:
-                _plat, _chat = _kt._kanban_current_source
-                _kt._kanban_board_sources[resolved] = (_plat, _chat)
-                # Also persist the owner in the kanban DB so it survives
-                # gateway restarts and is visible to other gateway
-                # processes. Replaces the in-memory dict's role as the
-                # sole source of truth — see
-                # ``GatewayKanbanWatchersMixin._kanban_lookup_board_owner``.
-                try:
-                    kb.set_board_owner(
-                        conn,
-                        board=resolved,
-                        platform=_plat,
-                        chat_id=_chat,
-                        user_id=os.environ.get("HERMES_KANBAN_SOURCE_USER") or None,
-                    )
-                except Exception:
-                    logger.debug(
-                        "kanban_tools: persistent set_board_owner failed for %s",
-                        resolved, exc_info=True,
-                    )
+            # Prefer ContextVar (per-session, concurrent-safe) over the
+            # process-wide registry. The registry write below is thread-safe
+            # (Bug #1 fix); the ContextVar isolates which session's source
+            # is recorded so two concurrent workers on different boards never
+            # cross-contaminate.
+            _current_src = None
+            try:
+                from gateway.session_context import _KANBAN_SOURCE_PLATFORM, _KANBAN_SOURCE_CHAT
+                _p = _KANBAN_SOURCE_PLATFORM.get()
+                _c = _KANBAN_SOURCE_CHAT.get()
+                if _p and _c:
+                    _current_src = (_p, _c)
+            except Exception:
+                pass
+            if _current_src and resolved:
+                _plat, _chat = _current_src
+                _board_source_registry.set(resolved, _plat, _chat)
         except Exception:
             pass
     return kb, conn
@@ -428,6 +506,7 @@ def _handle_show(args: dict, **kw) -> str:
 
             return json.dumps({
                 "task": _task_dict(task),
+                "verification": kb.parse_verification_config(task.body),
                 "parents": parents,
                 "children": children,
                 "comments": [
@@ -518,6 +597,247 @@ def _handle_list(args: dict, **kw) -> str:
         return tool_error(f"kanban_list: {e}")
 
 
+def _run_auto_verification(
+    workspace: str, auto_cmds: list,
+) -> list[dict]:
+    """Run ``verification.auto`` commands and return structured results.
+
+    Each command is executed via ``subprocess.run`` in the task workspace
+    so the verification environment matches the worker's.  Returns a list
+    of ``{"cmd", "exit_code", "stdout", "stderr", "passed"}`` dicts — one
+    per command.  ``passed`` is True iff ``exit_code == 0`` (the MVP
+    supports ``expect: "exit_code == 0"`` only).
+    """
+    import subprocess
+
+    cwd = workspace if workspace and os.path.isdir(workspace) else None
+    results: list[dict] = []
+    for cmd_spec in auto_cmds:
+        if not isinstance(cmd_spec, dict):
+            continue
+        cmd = str(cmd_spec.get("cmd", "")).strip()
+        if not cmd:
+            continue
+        try:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            results.append({
+                "cmd": cmd,
+                "exit_code": proc.returncode,
+                "stdout": proc.stdout[-2000:],
+                "stderr": proc.stderr[-2000:],
+                "passed": proc.returncode == 0,
+            })
+        except subprocess.TimeoutExpired:
+            results.append({
+                "cmd": cmd,
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": "timeout after 120s",
+                "passed": False,
+            })
+        except Exception as exc:
+            results.append({
+                "cmd": cmd,
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": str(exc),
+                "passed": False,
+            })
+    return results
+
+
+def should_auto_enable_task_loop(
+    goal_mode: Optional[bool], body: Optional[str],
+) -> bool:
+    """Determine whether a goal_mode task should auto-enter the task loop (M2-4).
+
+    Returns ``True`` when **both** conditions hold:
+    1. ``goal_mode`` is truthy (the task uses goal-turn budget).
+    2. The body declares ``verification.auto`` commands.
+
+    When the body has no ``verification.auto`` block, goal_mode still works
+    via the existing goal-turn budget mechanism — the two are complementary:
+    the task loop manages the verification closed-loop (verify → remediate →
+    re-verify), while goal-turn manages conversation turn budget.
+    """
+    if not goal_mode:
+        return False
+    if not body:
+        return False
+    from hermes_cli import kanban_db as _kb
+    vconfig = _kb.parse_verification_config(body)
+    return (
+        vconfig is not None
+        and isinstance(vconfig.get("auto"), list)
+        and len(vconfig["auto"]) > 0
+    )
+
+
+def inherit_verification_from_parents(
+    kb, conn, body: Optional[str], parents: list,
+) -> Optional[str]:
+    """Return *body* with inherited verification config (M3-2).
+
+    If *body* already declares its own ``verification`` block, it is
+    returned unchanged (child override).  Otherwise the function scans
+    *parents* in order and, upon finding the first parent whose body
+    declares a verification config, appends that config to *body* as a
+    YAML block.
+
+    Inheritance logic::
+
+        child_verification = child_body.get('verification') or parent_body.get('verification')
+
+    - Parent has ``verification.auto``  → child gets the same auto commands.
+    - Parent has ``verification.manual`` → child gets manual.
+    - Parent has no verification         → child gets nothing (backward compat).
+    """
+    if not body or not parents:
+        return body
+    child_vconfig = kb.parse_verification_config(body)
+    if child_vconfig is not None:
+        return body  # child already has its own verification
+    for pid in parents:
+        try:
+            ptask = kb.get_task(conn, pid)
+            if ptask and ptask.body:
+                pvconfig = kb.parse_verification_config(ptask.body)
+                if pvconfig:
+                    import yaml as _yaml
+                    v_yaml = _yaml.dump(
+                        {"verification": pvconfig},
+                        default_flow_style=False,
+                        allow_unicode=True,
+                    ).strip()
+                    logger.info(
+                        "M3-2: child task inherited verification from parent %s",
+                        pid,
+                    )
+                    return body.rstrip() + "\n\n" + v_yaml + "\n"
+        except Exception:
+            logger.debug(
+                "M3-2: verification inheritance from parent %s failed",
+                pid, exc_info=True,
+            )
+    return body
+
+
+def _handle_verification_failure(
+    kb, conn, tid, task, failures: list[dict], *,
+    summary: str, expected_run_id,
+) -> str:
+    """Handle a verification failure: write events + reopen or block.
+
+    Implements M1-3 (feedback injection), M1-4 (spiral convergence
+    reopen), and M1-5 (loop-limit → block).  The decision tree:
+
+    1. Count prior ``verification_failed`` events → ``loop_depth``.
+    2. If ``loop_depth >= max_loop_depth`` → block with loop history.
+    3. Otherwise → reopen for auto-remediation (task → ready).
+    4. Either way, write ``verification_failed`` + ``feedback_provided``
+       events so ``build_worker_context`` can inject structured feedback
+       into the next remediation worker.
+    """
+    max_loop_depth = int(
+        os.environ.get("HERMES_KANBAN_MAX_LOOP_DEPTH", "3")
+    )
+    loop_depth = kb.count_verification_loops(conn, tid)
+    feedback = {
+        "failures": failures,
+        "previous_attempt": (summary or "").strip()[:2000],
+        "loop_depth": loop_depth,
+    }
+
+    # Write verification_failed + feedback_provided events.
+    vfail_payload = {
+        "failures": failures,
+        "previous_attempt": feedback["previous_attempt"],
+        "loop_depth": loop_depth,
+        "max_loop_depth": max_loop_depth,
+    }
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn, tid, "verification_failed", vfail_payload,
+            run_id=kb._current_run_id(conn, tid),
+        )
+        kb._append_event(
+            conn, tid, "feedback_provided", feedback,
+            run_id=kb._current_run_id(conn, tid),
+        )
+
+    # M3-1: Notify parent tasks about this verification failure.
+    # Notification-only — does not modify parent status.
+    try:
+        from gateway.kanban_watchers import notify_parents_on_verification_failure
+        notify_parents_on_verification_failure(
+            conn, kb, tid,
+            failures=failures,
+            loop_depth=loop_depth,
+        )
+    except Exception:
+        logger.debug(
+            "M3-1: parent notification skipped for %s", tid, exc_info=True,
+        )
+
+    if loop_depth >= max_loop_depth:
+        # M1-5: Loop limit reached — block with loop history summary.
+        loop_history = []
+        for i, f in enumerate(failures, 1):
+            loop_history.append(
+                f"  {i}. `{f.get('cmd', '?')}` exit={f.get('exit_code', '?')}"
+            )
+        reason = (
+            f"verification failed {loop_depth + 1} times "
+            f"(max_loop_depth={max_loop_depth}). "
+            f"Loop history:\n" + "\n".join(loop_history)
+        )
+        kb.block_task(
+            conn, tid, reason=reason,
+            expected_run_id=expected_run_id,
+        )
+        return tool_error(
+            f"kanban_complete: verification FAILED (loop {loop_depth + 1}/"
+            f"{max_loop_depth}). Loop limit reached — task blocked. "
+            f"Failures:\n" + "\n".join(
+                f"  - `{f.get('cmd', '?')}`: exit={f.get('exit_code', '?')}, "
+                f"stderr={f.get('stderr', '')[:200]}"
+                for f in failures
+            )
+        )
+
+    # M1-4: Reopen for auto-remediation (task → ready, same workspace).
+    ok = kb.reopen_for_remediation(
+        conn, tid,
+        loop_depth=loop_depth,
+        failures=failures,
+        feedback=feedback,
+        expected_run_id=expected_run_id,
+    )
+    if not ok:
+        return tool_error(
+            f"kanban_complete: verification FAILED but could not reopen "
+            f"task {tid} for remediation (state transition failed). "
+            f"Manual intervention required."
+        )
+    return tool_error(
+        f"kanban_complete: verification FAILED (loop {loop_depth + 1}/"
+        f"{max_loop_depth}). Task reopened for auto-remediation. "
+        f"The dispatcher will re-dispatch you with structured feedback. "
+        f"Failures:\n" + "\n".join(
+            f"  - `{f.get('cmd', '?')}`: exit={f.get('exit_code', '?')}, "
+            f"stderr={f.get('stderr', '')[:200]}"
+            for f in failures
+        )
+    )
+
+
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
     tid = _default_task_id(args.get("task_id"))
@@ -598,6 +918,38 @@ def _handle_complete(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board, update_source=True)
         try:
+            # --- M1: Verification gate (M1-2/M1-3/M1-4/M1-5) ----------
+            # If the task body declares ``verification.auto``, run the
+            # verification commands BEFORE accepting the completion.
+            # Failure → reopen or block (spiral convergence).
+            # Success → fall through to normal complete_task, then
+            # write a ``verified`` event.
+            _verification_passed = False
+            task = kb.get_task(conn, tid)
+            if task:
+                vconfig = kb.parse_verification_config(task.body)
+                if (
+                    vconfig
+                    and isinstance(vconfig.get("auto"), list)
+                    and vconfig["auto"]
+                ):
+                    workspace = (
+                        task.workspace_path
+                        or os.environ.get("HERMES_KANBAN_WORKSPACE", "")
+                    )
+                    results = _run_auto_verification(
+                        workspace, vconfig["auto"]
+                    )
+                    failures = [r for r in results if not r["passed"]]
+                    if failures:
+                        return _handle_verification_failure(
+                            kb, conn, tid, task, failures,
+                            summary=summary or result or "",
+                            expected_run_id=_worker_run_id(tid),
+                        )
+                    _verification_passed = True
+            # --- End verification gate --------------------------------
+
             try:
                 ok = kb.complete_task(
                     conn, tid,
@@ -629,6 +981,14 @@ def _handle_complete(args: dict, **kw) -> str:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
+            # M1-2: Write ``verified`` event when auto-verification passed.
+            if _verification_passed:
+                with kb.write_txn(conn):
+                    kb._append_event(
+                        conn, tid, "verified",
+                        {"auto": True},
+                        run_id=kb._current_run_id(conn, tid),
+                    )
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)
         finally:
@@ -837,6 +1197,13 @@ def _handle_create(args: dict, **kw) -> str:
                     if _self_task is not None and _self_task.workspace_kind:
                         workspace_kind = _self_task.workspace_kind
                         workspace_path = _self_task.workspace_path
+
+            # M3-2: Verification standard inheritance.
+            # If the child body doesn't declare its own verification block,
+            # copy the first parent's verification config into the child body.
+            # Child can override by explicitly declaring verification.
+            body = inherit_verification_from_parents(kb, conn, body, list(parents))
+
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),
@@ -863,73 +1230,31 @@ def _handle_create(args: dict, **kw) -> str:
                 session_id=session_id,
             )
             new_task = kb.get_task(conn, new_tid)
-
-            # Auto-subscribe the current source (platform, chat_id) so the
-            # user who created this task gets terminal-state notifications.
-            # This mirrors what the gateway's /kanban create slash command
-            # does, but runs synchronously in the agent tool context.
-            try:
-                _current = _kanban_current_source
-                # Fallback to env vars when the module-level variable is
-                # not set (e.g. agent running in a thread where the gateway's
-                # module-level injection didn't propagate, or after resume).
-                if not _current:
-                    _plat_env = os.environ.get("HERMES_KANBAN_SOURCE_PLATFORM")
-                    _chat_env = os.environ.get("HERMES_KANBAN_SOURCE_CHAT")
-                    if _plat_env and _chat_env:
-                        _current = (_plat_env, _chat_env)
-                # Third fallback: session context vars set by session_context.py
-                # for ALL session types (gateway, TUI, API, auto-resume).
-                # These are the most reliable because they persist across
-                # gateway restarts and work in non-gateway contexts.
-                # Uses get_session_env() which checks ContextVar first, then
-                # falls back to os.environ for CLI/cron compatibility.
-                if not _current:
-                    try:
-                        from gateway.session_context import get_session_env as _gse
-                        _plat_env = _gse("HERMES_SESSION_PLATFORM", "")
-                        _chat_env = _gse("HERMES_SESSION_CHAT_ID", "")
-                        if _plat_env and _chat_env:
-                            _current = (_plat_env, _chat_env)
-                    except ImportError:
-                        pass  # not running in gateway context
-                if _current and new_tid:
-                    _plat_s, _chat_s = _current
-                    _notifier = os.environ.get("HERMES_PROFILE") or "default"
-                    kb.add_notify_sub(
-                        conn,
-                        task_id=new_tid,
-                        platform=_plat_s,
-                        chat_id=_chat_s,
-                        notifier_profile=_notifier,
+            # M2-4: goal_mode + verification.auto → auto-enable task loop.
+            # Write a task_loop_started event so the EpochEngine and
+            # downstream consumers know this task entered the
+            # verification closed-loop, not just the goal-turn budget.
+            if should_auto_enable_task_loop(goal_mode, body):
+                try:
+                    with kb.write_txn(conn):
+                        kb._append_event(
+                            conn, new_tid, "task_loop_started",
+                            {
+                                "goal_mode": True,
+                                "verification_auto": True,
+                                "auto_loop": True,
+                            },
+                        )
+                    logger.info(
+                        "kanban_create: task %s auto-enabled task loop "
+                        "(goal_mode + verification.auto)",
+                        new_tid,
                     )
-                    # Also subscribe other connected platforms via their
-                    # home channels (gateway injects these before each message).
-                    try:
-                        _all_hc = list(_kanban_all_home_channels)
-                        # Fallback to env var for home channels too
-                        if not _all_hc:
-                            _all_hc_env = os.environ.get("HERMES_KANBAN_ALL_HC")
-                            if _all_hc_env:
-                                import json as _json
-                                _parsed = _json.loads(_all_hc_env)
-                                if isinstance(_parsed, list):
-                                    _all_hc = _parsed
-                        for _p, _hc in _all_hc:
-                            if _p == _plat_s:
-                                continue
-                            kb.add_notify_sub(
-                                conn,
-                                task_id=new_tid,
-                                platform=_p,
-                                chat_id=str(_hc),
-                                notifier_profile=_notifier,
-                            )
-                    except Exception:
-                        pass  # best-effort cross-platform sub
-            except Exception:
-                pass  # best-effort; never fail the create for a sub error
-
+                except Exception as tl_exc:
+                    logger.debug(
+                        "kanban_create: task_loop_started event failed for %s: %s",
+                        new_tid, tl_exc,
+                    )
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,

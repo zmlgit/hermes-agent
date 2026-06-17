@@ -964,6 +964,14 @@ class Event:
     payload: Optional[dict]
     created_at: int
     run_id: Optional[int] = None
+    epoch_id: Optional[str] = None
+
+
+# Alias for the loop-engineering vocabulary: an ``Event`` row scoped to (or
+# produced by) an epoch. The dataclass is the same; ``TaskEvent`` is the name
+# the design docs and downstream tooling use. Kept as a bare alias so
+# ``from hermes_cli.kanban_db import TaskEvent`` resolves.
+TaskEvent = Event
 
 
 # ---------------------------------------------------------------------------
@@ -1058,6 +1066,7 @@ CREATE TABLE IF NOT EXISTS task_events (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id    TEXT NOT NULL,
     run_id     INTEGER,
+    epoch_id   TEXT,
     kind       TEXT NOT NULL,
     payload    TEXT,
     created_at INTEGER NOT NULL
@@ -1131,6 +1140,7 @@ CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_task_kind      ON task_events(task_id, kind);
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
@@ -1157,28 +1167,6 @@ CREATE TABLE IF NOT EXISTS kanban_board_subs (
 
 CREATE INDEX IF NOT EXISTS idx_board_subs_board       ON kanban_board_subs(board);
 CREATE INDEX IF NOT EXISTS idx_board_subs_cursor      ON kanban_board_subs(board, last_event_id);
-
--- Per-board owner: the (platform, chat_id) of the user session that
--- last operated on this board. Replaces the in-memory
--- ``_kanban_last_user_source`` dict in
--- gateway/kanban_watchers.py:GatewayKanbanWatchersMixin so the
--- owner survives gateway restarts and works across multiple
--- gateway processes (multi-worker). The notifier inject path reads
--- this table to decide where to deliver a synthetic
--- ``[KANBAN-EVENT]`` message when a subscribed task reaches a
--- terminal state. Multiple rows per board are allowed (multi-user
--- boards) — the watcher picks the most recently updated row.
-CREATE TABLE IF NOT EXISTS kanban_board_owners (
-    board      TEXT NOT NULL,
-    platform   TEXT NOT NULL,
-    chat_id    TEXT NOT NULL,
-    user_id    TEXT,
-    updated_at INTEGER NOT NULL,
-    PRIMARY KEY (board, platform, chat_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_board_owners_board  ON kanban_board_owners(board);
-CREATE INDEX IF NOT EXISTS idx_board_owners_recent ON kanban_board_owners(board, updated_at DESC);
 """
 
 
@@ -1766,6 +1754,23 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         "ON task_events(run_id, id)"
     )
 
+    # task_events gained an epoch_id column for loop-engineering epoch
+    # tracking (nullable, backward-compatible). Back-fill as NULL for
+    # historical events — they predate epochs and can't be attributed.
+    if "epoch_id" not in ev_cols:
+        _add_column_if_missing(conn, "task_events", "epoch_id", "epoch_id TEXT")
+
+    # Partial index: only rows with a non-null epoch_id are interesting
+    # for epoch-level queries, keeping the index small.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_epoch "
+        "ON task_events(epoch_id) WHERE epoch_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_task_kind "
+        "ON task_events(task_id, kind)"
+    )
+
     notify_table_exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_notify_subs'"
     ).fetchone() is not None
@@ -1781,34 +1786,26 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     # Board-level subscriptions (added alongside task-level subscriptions).
     # The table is created in SCHEMA_SQL so new DBs get it automatically.
     # This migration only runs on legacy DBs that lack it.
-    #
-    # Note: split into per-statement ``execute`` calls (not a single
-    # multi-statement ``conn.execute(SQL)``) because Python's stdlib
-    # sqlite3 driver raises ``ProgrammingError: You can only execute
-    # one statement at a time`` when given a multi-statement string.
-    # ``executescript()`` would work but it implicitly commits and
-    # bypasses ``write_txn``'s serialization. We want the migration
-    # to participate in the caller's transaction. Splitting is cheap
-    # (a handful of DDL statements) and keeps the surrounding
-    # write_txn contract intact.
     board_subs_exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_board_subs'"
     ).fetchone() is not None
     if not board_subs_exists:
+        # Use separate execute() calls — sqlite3.Connection.execute() only
+        # accepts a single statement (executescript is needed for multi-
+        # statement strings). Splitting here keeps the migration working on
+        # raw connections that call _migrate_add_optional_columns directly.
         conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS kanban_board_subs (
-                board         TEXT NOT NULL DEFAULT '__default__',
-                scope         TEXT NOT NULL DEFAULT 'task_done',
-                target_kind   TEXT NOT NULL DEFAULT 'platform_chat',
-                target_payload TEXT NOT NULL DEFAULT '{}',
-                user_id       TEXT,
-                notifier_profile TEXT,
-                created_at    INTEGER NOT NULL,
-                last_event_id INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (board, scope, target_kind, target_payload)
-            )
-            """
+            "CREATE TABLE IF NOT EXISTS kanban_board_subs ("
+            "board TEXT NOT NULL DEFAULT '__default__',"
+            "scope TEXT NOT NULL DEFAULT 'task_done',"
+            "target_kind TEXT NOT NULL DEFAULT 'platform_chat',"
+            "target_payload TEXT NOT NULL DEFAULT '{}',"
+            "user_id TEXT,"
+            "notifier_profile TEXT,"
+            "created_at INTEGER NOT NULL,"
+            "last_event_id INTEGER NOT NULL DEFAULT 0,"
+            "PRIMARY KEY (board, scope, target_kind, target_payload)"
+            ")"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_board_subs_board "
@@ -1817,34 +1814,6 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_board_subs_cursor "
             "ON kanban_board_subs(board, last_event_id)"
-        )
-
-    # Board-level owner table (added in the silent_reply→system_session
-    # refactor). Same split-into-single-statements rationale as
-    # ``kanban_board_subs`` above.
-    board_owners_exists = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='kanban_board_owners'"
-    ).fetchone() is not None
-    if not board_owners_exists:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS kanban_board_owners (
-                board      TEXT NOT NULL,
-                platform   TEXT NOT NULL,
-                chat_id    TEXT NOT NULL,
-                user_id    TEXT,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (board, platform, chat_id)
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_board_owners_board "
-            "ON kanban_board_owners(board)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_board_owners_recent "
-            "ON kanban_board_owners(board, updated_at DESC)"
         )
 
     # One-shot backfill: any task that is 'running' before runs existed
@@ -1937,11 +1906,13 @@ _REBUILD_SPECS = {
     "task_events": (
         "CREATE TABLE task_events ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " task_id TEXT NOT NULL, run_id INTEGER, kind TEXT NOT NULL,"
-        " payload TEXT, created_at INTEGER NOT NULL)",
+        " task_id TEXT NOT NULL, run_id INTEGER, epoch_id TEXT,"
+        " kind TEXT NOT NULL, payload TEXT, created_at INTEGER NOT NULL)",
         (
             "CREATE INDEX idx_events_task ON task_events(task_id, created_at)",
             "CREATE INDEX idx_events_run ON task_events(run_id, id)",
+            "CREATE INDEX idx_events_epoch ON task_events(epoch_id) WHERE epoch_id IS NOT NULL",
+            "CREATE INDEX idx_events_task_kind ON task_events(task_id, kind)",
         ),
     ),
     "task_comments": (
@@ -2805,6 +2776,11 @@ def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
                 payload=payload,
                 created_at=r["created_at"],
                 run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+                epoch_id=(
+                    r["epoch_id"]
+                    if "epoch_id" in r.keys() and r["epoch_id"] is not None
+                    else None
+                ),
             )
         )
     return out
@@ -2817,6 +2793,7 @@ def _append_event(
     payload: Optional[dict] = None,
     *,
     run_id: Optional[int] = None,
+    epoch_id: Optional[str] = None,
 ) -> None:
     """Record an event row.  Called from within an already-open txn.
 
@@ -2824,13 +2801,17 @@ def _append_event(
     events by attempt. For events that aren't scoped to a single run
     (task created/edited/archived, dependency promotion) leave it None
     and the row carries NULL.
+
+    ``epoch_id`` is optional: pass the current epoch identifier so
+    loop-engineering queries can find all events belonging to a
+    convergence round via index lookup instead of a payload scan.
     """
     now = int(time.time())
     pl = json.dumps(payload, ensure_ascii=False) if payload else None
     conn.execute(
-        "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (task_id, run_id, kind, pl, now),
+        "INSERT INTO task_events (task_id, run_id, epoch_id, kind, payload, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (task_id, run_id, epoch_id, kind, pl, now),
     )
 
 
@@ -3852,153 +3833,6 @@ def complete_task(
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     return True
-
-
-# Statuses that mean "this child is finished from the parent's perspective".
-# Mirrors the terminal set the orchestrator epoch callback watches for
-# (see ``gateway/kanban_watchers.py`` _detect_epoch). When ALL of a
-# parent's children are in this set, the parent can be auto-completed.
-_AUTO_COMPLETE_CHILD_TERMINAL = frozenset({
-    "done", "archived", "blocked", "crashed", "gave_up", "timed_out",
-})
-
-
-def auto_complete_parents(
-    conn: sqlite3.Connection,
-    task_ids: Iterable[str],
-) -> list[str]:
-    """Auto-complete any parent whose children are all in a terminal state.
-
-    Given a batch of task ids that just reached a terminal state (e.g.
-    the events the orchestrator epoch callback just observed), walk
-    upward in the ``task_links`` graph and check every parent. A parent
-    is auto-completed when:
-
-    1. The parent itself is in ``running`` status. Anything already in a
-       terminal status (``done`` / ``archived`` / ``blocked`` / etc.) is
-       skipped — no double-completion, no resurrecting archived work.
-    2. Every one of the parent's children is in
-       :data:`_AUTO_COMPLETE_CHILD_TERMINAL`. A child still in
-       ``todo`` / ``ready`` / ``running`` / ``scheduled`` / ``triage``
-       / ``review`` means the parent still has live work to wait for.
-    3. The parent's own parents are all in a terminal status. If a
-       grandparent is still ``running``, completing this parent would
-       leak past an upstream gate (the parent's worker likely depends on
-       its own parent being settled). We refuse in that case so the
-       human / orchestrator can decide explicitly.
-
-    Auto-completion reuses :func:`complete_task` so all the existing
-    side effects fire: the run is closed via :func:`_end_run`, a
-    ``completed`` event is appended, the consecutive-failures counter
-    is cleared, ``recompute_ready`` cascades, and the scratch workspace
-    is cleaned up. We pass a synthetic summary / metadata so the event
-    payload is self-describing and downstream workers reading
-    ``build_worker_context`` can tell the completion was mechanical
-    rather than a real worker ``kanban_complete`` call.
-
-    Returns the list of task ids that were auto-completed (parents that
-    transitioned to ``done`` as a side effect of this call). Order is
-    bottom-up: a parent that itself just got auto-completed will be
-    visible to subsequent iterations of the loop, so a multi-level
-    chain (grandparent → parent → child) can collapse in a single
-    invocation when every child is terminal.
-
-    Safe to call inside or outside an existing transaction; each
-    candidate completion opens its own ``write_txn`` via
-    :func:`complete_task`.
-    """
-    completed: list[str] = []
-    seen: set[str] = set()
-    # Iterate to a fixed point so chained auto-completions (a parent
-    # whose parent is also a "children all terminal" candidate) all
-    # get processed in one call. The ``seen`` set guards against cycles
-    # in the link graph.
-    queue: list[str] = [str(t).strip() for t in task_ids if str(t).strip()]
-    while queue:
-        next_batch: list[str] = []
-        for task_id in queue:
-            if task_id in seen:
-                continue
-            seen.add(task_id)
-            # Find every parent of this just-finished child.
-            parent_rows = conn.execute(
-                "SELECT t.id, t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,),
-            ).fetchall()
-            for prow in parent_rows:
-                parent_id = prow["id"]
-                if parent_id in seen:
-                    # Already processed in this call (or queued) — skip
-                    # to avoid redundant DB work. The fixed-point loop
-                    # below catches any parent that became eligible
-                    # because of a sibling completing earlier in the
-                    # queue.
-                    continue
-                parent_status = prow["status"]
-                # Gate 1: only auto-complete active parents.
-                if parent_status != "running":
-                    continue
-                # Gate 2: every child of the parent must be terminal.
-                child_statuses = conn.execute(
-                    "SELECT t.status FROM tasks t "
-                    "JOIN task_links l ON l.child_id = t.id "
-                    "WHERE l.parent_id = ?",
-                    (parent_id,),
-                ).fetchall()
-                if not child_statuses:
-                    # Parent has no children at all — leave it for the
-                    # worker / orchestrator to close explicitly. Auto
-                    # completion is only for "children all done" cases.
-                    continue
-                if not all(
-                    c["status"] in _AUTO_COMPLETE_CHILD_TERMINAL
-                    for c in child_statuses
-                ):
-                    continue
-                # Gate 3: the parent's own parents must all be terminal
-                # too. Otherwise completing the parent would silently
-                # bypass an upstream gate the grandparent represents
-                # (e.g. the grandparent is a human-review card that
-                # hasn't been approved yet).
-                gp_statuses = conn.execute(
-                    "SELECT t.status FROM tasks t "
-                    "JOIN task_links l ON l.parent_id = t.id "
-                    "WHERE l.child_id = ?",
-                    (parent_id,),
-                ).fetchall()
-                if gp_statuses and not all(
-                    g["status"] in _AUTO_COMPLETE_CHILD_TERMINAL
-                    for g in gp_statuses
-                ):
-                    continue
-                # All gates passed — auto-complete via the existing
-                # path. ``expected_run_id`` is intentionally NOT set:
-                # this is a system-driven close, not a worker's CAS,
-                # and we don't want a stale run id to block it.
-                ok = complete_task(
-                    conn,
-                    parent_id,
-                    summary=(
-                        f"auto-completed by kanban_db.auto_complete_parents: "
-                        f"all {len(child_statuses)} child task(s) reached terminal state"
-                    ),
-                    metadata={
-                        "auto_completed": True,
-                        "reason": "all_children_terminal",
-                        "child_count": len(child_statuses),
-                    },
-                )
-                if ok:
-                    completed.append(parent_id)
-                    seen.add(parent_id)
-                    # Re-queue so any grandparent of this parent is
-                    # re-checked — completing this parent may have
-                    # made the grandparent eligible.
-                    next_batch.append(parent_id)
-        queue = next_batch
-    return completed
 
 
 # ---------------------------------------------------------------------------
@@ -7371,6 +7205,44 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             lines.extend(body_lines)
             lines.append("")
 
+    # Verification feedback (M1-3): if prior attempts failed verification,
+    # inject structured feedback so the remediation worker knows exactly
+    # what went wrong.  This is the Feedback ring of the loop.
+    vhist = verification_history(conn, task_id)
+    vfail_events = [e for e in vhist if e["kind"] == "verification_failed"]
+    if vfail_events:
+        latest_fail = vfail_events[-1]
+        payload = latest_fail.get("payload") or {}
+        failures = payload.get("failures", [])
+        loop_depth = payload.get("loop_depth", len(vfail_events))
+        lines.append("## Verification Feedback (previous attempt failed)")
+        lines.append(
+            f"This is remediation loop **{loop_depth}**. "
+            f"The previous attempt's completion was rejected because "
+            f"verification commands failed:"
+        )
+        lines.append("")
+        for i, f in enumerate(failures, 1):
+            lines.append(f"### Failure {i}: `{f.get('cmd', '?')}`")
+            lines.append(f"- exit_code: {f.get('exit_code', '?')}")
+            stderr = f.get("stderr", "").strip()
+            if stderr:
+                lines.append(f"- stderr:\n```\n{_cap(stderr, 1500)}\n```")
+            stdout = f.get("stdout", "").strip()
+            if stdout:
+                lines.append(f"- stdout (tail):\n```\n{_cap(stdout, 800)}\n```")
+            lines.append("")
+        # Surface the previous attempt's summary so the worker has context.
+        prev_summary = payload.get("previous_attempt", "")
+        if prev_summary:
+            lines.append(f"**Previous attempt summary:** {_cap(prev_summary)}")
+            lines.append("")
+        lines.append(
+            "Fix the issues above so the verification commands pass, "
+            "then call `kanban_complete` again."
+        )
+        lines.append("")
+
     # Cross-task role history: what else has THIS assignee completed
     # recently? Gives the worker implicit continuity — "I'm the reviewer
     # and my last three reviews focused on security" — without forcing
@@ -7428,6 +7300,193 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
             lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Verification config parsing (M1-1)
+# ---------------------------------------------------------------------------
+
+def parse_verification_config(body: Optional[str]) -> Optional[dict]:
+    """Parse the ``verification`` block from a task body.
+
+    Looks for a YAML ``verification:`` section within the markdown body.
+    Returns a dict like ``{"auto": [{"cmd": "...", "expect": "..."}]}``
+    or ``{"manual": True}``, or ``None`` when no verification block is
+    present (the default — backward-compatible manual verification).
+
+    The parser handles both fenced and unfenced YAML blocks::
+
+        verification:
+          auto:
+            - cmd: "pytest tests/ -x -q"
+              expect: "exit_code == 0"
+
+        verification:
+          manual: true
+    """
+    if not body or not body.strip():
+        return None
+    # Strip markdown code fences so the YAML parser sees clean content.
+    clean = re.sub(r"```(?:ya?ml)?\s*\n", "", body)
+    clean = clean.replace("```", "")
+    # Find the ``verification:`` key and its indented value block.
+    match = re.search(
+        r"^verification:\s*\n((?:[ \t]+.*\n?)+)",
+        clean,
+        re.MULTILINE,
+    )
+    if not match:
+        return None
+    yaml_text = "verification:\n" + match.group(1)
+    try:
+        import yaml
+
+        result = yaml.safe_load(yaml_text)
+        if isinstance(result, dict) and "verification" in result:
+            v = result["verification"]
+            if isinstance(v, dict):
+                return v
+        return None
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Loop-engineering helpers (M1-3 / M1-4 / M1-5)
+# ---------------------------------------------------------------------------
+
+def count_verification_loops(conn: sqlite3.Connection, task_id: str) -> int:
+    """Return the number of ``verification_failed`` events for *task_id*.
+
+    This is the loop-depth counter for spiral convergence (M1-5).
+    Each prior failure increments the depth; the caller decides whether
+    to reopen for remediation (depth < max) or block (depth >= max).
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_events "
+        "WHERE task_id = ? AND kind = 'verification_failed'",
+        (task_id,),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def reopen_for_remediation(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    loop_depth: int,
+    failures: list[dict],
+    feedback: Optional[dict] = None,
+    expected_run_id: Optional[int] = None,
+) -> bool:
+    """Transition ``running -> ready`` so the dispatcher re-dispatches.
+
+    Used by the spiral-convergence loop (M1-4): when ``kanban_complete``
+    detects a verification failure and the loop budget is not exhausted,
+    the task is sent back to the ready queue.  The same workspace is
+    reused so the remediation worker inherits prior output.
+
+    The current run is closed with ``outcome='rejected'`` (one of the
+    new outcomes added by DESIGN.md §2.2).  A ``remediation_created``
+    event is written so downstream consumers know this was an automated
+    reopen, not a manual one.
+    """
+    now = int(time.time())
+    with write_txn(conn):
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status        = 'ready',
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL,
+                       completed_at  = NULL,
+                       result        = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'done', 'blocked')
+                """,
+                (task_id,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status        = 'ready',
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL,
+                       completed_at  = NULL,
+                       result        = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'done', 'blocked')
+                   AND current_run_id = ?
+                """,
+                (task_id, int(expected_run_id)),
+            )
+        if cur.rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="rejected",
+            status="rejected",
+            summary=(
+                f"verification failed (loop_depth={loop_depth}); "
+                f"reopened for auto-remediation"
+            ),
+            metadata={
+                "loop_depth": loop_depth,
+                "failures": failures,
+                "feedback": feedback,
+            },
+        )
+        _append_event(
+            conn,
+            task_id,
+            "remediation_created",
+            {
+                "loop_depth": loop_depth,
+                "failures": failures,
+                "feedback": feedback,
+            },
+            run_id=run_id,
+        )
+    # Recompute dependents outside the write txn so we don't nest
+    # transactions (recompute_ready opens its own write_txn).
+    recompute_ready(conn)
+    return True
+
+
+def verification_history(conn: sqlite3.Connection, task_id: str) -> list[dict]:
+    """Return verification events (verified / verification_failed) for a task.
+
+    Used by ``build_worker_context`` (M1-3) to inject structured feedback
+    into the next remediation worker's prompt.  Ordered oldest → newest.
+    """
+    rows = conn.execute(
+        "SELECT kind, payload, created_at FROM task_events "
+        "WHERE task_id = ? AND kind IN ('verified', 'verification_failed', "
+        "'feedback_provided', 'remediation_created') "
+        "ORDER BY created_at ASC",
+        (task_id,),
+    ).fetchall()
+    result: list[dict] = []
+    for r in rows:
+        payload = None
+        if r["payload"]:
+            try:
+                payload = json.loads(r["payload"])
+            except Exception:
+                payload = None
+        result.append(
+            {
+                "kind": r["kind"],
+                "payload": payload,
+                "created_at": int(r["created_at"]),
+            }
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -7629,6 +7688,7 @@ def unseen_events_for_sub(
             id=r["id"], task_id=r["task_id"], kind=r["kind"],
             payload=payload, created_at=r["created_at"],
             run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+            epoch_id=(r["epoch_id"] if "epoch_id" in r.keys() and r["epoch_id"] is not None else None),
         ))
         max_id = max(max_id, int(r["id"]))
     return max_id, out
@@ -7802,86 +7862,6 @@ def list_board_subs(
     return [dict(r) for r in conn.execute(q, params).fetchall()]
 
 
-# ---------------------------------------------------------------------------
-# Board owner — persistent record of the (platform, chat_id) that last
-# operated on each board. Replaces the in-memory
-# ``_kanban_last_user_source`` dict in
-# gateway/kanban_watchers.py:GatewayKanbanWatchersMixin.
-# ---------------------------------------------------------------------------
-
-def set_board_owner(
-    conn: sqlite3.Connection,
-    *,
-    board: str,
-    platform: str,
-    chat_id: str,
-    user_id: Optional[str] = None,
-) -> None:
-    """Record (or refresh) the owner of *board* as *(platform, chat_id)*.
-
-    Idempotent on the (board, platform, chat_id) primary key — repeated
-    calls bump ``updated_at`` and overwrite ``user_id`` rather than
-    insert a duplicate row. Multiple owners per board are allowed
-    (one row per (board, platform, chat_id) tuple), so a board with
-    three active users in three chats ends up with three rows.
-    """
-    now = int(time.time())
-    with write_txn(conn):
-        conn.execute(
-            """
-            INSERT INTO kanban_board_owners
-                (board, platform, chat_id, user_id, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(board, platform, chat_id) DO UPDATE SET
-                user_id    = excluded.user_id,
-                updated_at = excluded.updated_at
-            """,
-            (board, platform, chat_id, user_id, now),
-        )
-
-
-def get_board_owner(
-    conn: sqlite3.Connection,
-    *,
-    board: str,
-) -> Optional[tuple[str, str]]:
-    """Return the most recently active owner's (platform, chat_id) for
-    *board*, or ``None`` if no owner has been recorded.
-
-    Used by the kanban notifier's inject path
-    (``GatewayKanbanWatchersMixin._kanban_lookup_board_owner``) to
-    decide which chat to deliver a synthetic ``[KANBAN-EVENT]``
-    message to. Multi-user boards return the most recently active
-    owner; if you need to fan out to all owners, query
-    ``list_board_owners`` instead.
-    """
-    row = conn.execute(
-        "SELECT platform, chat_id FROM kanban_board_owners "
-        "WHERE board = ? ORDER BY updated_at DESC LIMIT 1",
-        (board,),
-    ).fetchone()
-    if row is None:
-        return None
-    return (row[0], row[1])
-
-
-def list_board_owners(
-    conn: sqlite3.Connection,
-    *,
-    board: str,
-) -> list[dict]:
-    """List every owner recorded for *board* (one row per
-    (platform, chat_id) tuple), most-recently-active first.
-    """
-    rows = conn.execute(
-        "SELECT board, platform, chat_id, user_id, updated_at "
-        "FROM kanban_board_owners WHERE board = ? "
-        "ORDER BY updated_at DESC",
-        (board,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
 def claim_unseen_board_events(
     conn: sqlite3.Connection,
     *,
@@ -7957,6 +7937,8 @@ def claim_unseen_board_events(
                 payload=payload, created_at=r["created_at"],
                 run_id=(int(r["run_id"]) if "run_id" in r.keys()
                         and r["run_id"] is not None else None),
+                epoch_id=(r["epoch_id"] if "epoch_id" in r.keys()
+                          and r["epoch_id"] is not None else None),
             ))
             new_cursor = max(new_cursor, int(r["id"]))
 

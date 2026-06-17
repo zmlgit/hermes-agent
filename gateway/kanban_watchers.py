@@ -11,6 +11,7 @@ behavior-neutral move that lifts ~1,000 LOC out of run.py.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import os
@@ -25,24 +26,439 @@ from typing import Any, Optional
 logger = logging.getLogger("gateway.run")
 
 
-class GatewayKanbanWatchersMixin:
-    """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
+# ---------------------------------------------------------------------------
+# M2-1: Smart gave_up detection — pure functions
+# ---------------------------------------------------------------------------
 
-    # ── Orchestrator epoch callback state ────────────────────────────────
-    _orch_cb_cooldowns: dict[str, float] = {}
-    _orch_cb_stale_counts: dict[str, int] = {}
-    _orch_epoch_counts: dict[str, int] = {}
-    _orch_cb_last_event_id: dict[str, int] = {}
+def stderr_similarity(s1: Optional[str], s2: Optional[str]) -> float:
+    """Similarity ratio of the first 200 characters of two stderr strings.
 
-    # Per-board last kanban-interaction source (platform, chat_id).
-    # Keyed by board slug — each board remembers which session last
-    # operated on it via kanban tools. Updated only when kanban tools
-    # are actually invoked, not on every message.
-    _kanban_last_user_source: dict[str, tuple[str, str]] = {}
+    Edge cases:
+    - Both empty/None → 1.0 (trivially identical).
+    - One empty, other not → 0.0.
+    - Non-string → coerced to ``str()``.
+    """
+    a = str(s1 or "")[:200]
+    b = str(s2 or "")[:200]
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-    async def _kanban_orchestrator_callback(
+def detect_repeated_verification_errors(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[dict]:
+    """Detect 2 consecutive verification failures with same cmd + similar stderr.
+
+    Returns a detection dict ``{"reason", "details"}`` when the last two
+    ``verification_failed`` events share the same failed command and their
+    stderr (first 200 chars) has >80% similarity.  Returns ``None``
+    otherwise.
+    """
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'verification_failed' "
+        "ORDER BY created_at DESC, id DESC LIMIT 2",
+        (task_id,),
+    ).fetchall()
+    if len(rows) < 2:
+        return None
+    events: list[dict] = []
+    for r in rows:
+        try:
+            events.append(json.loads(r["payload"]) if r["payload"] else {})
+        except Exception:
+            events.append({})
+    older, newer = events[1], events[0]  # events[0] is newest
+    older_failures = older.get("failures") or []
+    newer_failures = newer.get("failures") or []
+    if not older_failures or not newer_failures:
+        return None
+    old_cmd = str(older_failures[0].get("cmd", ""))
+    new_cmd = str(newer_failures[0].get("cmd", ""))
+    if old_cmd != new_cmd:
+        return None
+    old_stderr = str(older_failures[0].get("stderr", ""))
+    new_stderr = str(newer_failures[0].get("stderr", ""))
+    sim = stderr_similarity(old_stderr, new_stderr)
+    if sim > 0.8:
+        return {
+            "reason": (
+                f"repeated_verification_error: same cmd '{old_cmd}' "
+                f"with {sim:.0%} stderr similarity across consecutive failures"
+            ),
+            "details": {
+                "cmd": old_cmd,
+                "stderr_similarity": round(sim, 3),
+                "older_stderr_head": old_stderr[:200],
+                "newer_stderr_head": new_stderr[:200],
+            },
+        }
+    return None
+
+
+def detect_token_anomaly(
+    conn: sqlite3.Connection, task_id: str, *,
+    threshold: int = 50000,
+) -> Optional[dict]:
+    """Detect a single closed run whose token usage exceeds *threshold*.
+
+    Reads ``task_runs.metadata`` (JSON) for ``input_tokens`` and
+    ``output_tokens``.  Returns a detection dict when the total exceeds
+    the threshold, ``None`` otherwise.
+    """
+    row = conn.execute(
+        "SELECT id, metadata FROM task_runs "
+        "WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY ended_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        meta = json.loads(row["metadata"]) if row["metadata"] else {}
+    except Exception:
+        meta = {}
+    input_tokens = int(meta.get("input_tokens", 0) or 0)
+    output_tokens = int(meta.get("output_tokens", 0) or 0)
+    total = input_tokens + output_tokens
+    if total > threshold:
+        return {
+            "reason": (
+                f"token_anomaly: {total} tokens "
+                f"(input={input_tokens}, output={output_tokens}, "
+                f"threshold={threshold})"
+            ),
+            "details": {
+                "run_id": int(row["id"]),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total": total,
+                "threshold": threshold,
+            },
+        }
+    return None
+
+
+def detect_no_output(
+    conn: sqlite3.Connection, task_id: str, *,
+    min_runs: int = 3,
+) -> Optional[dict]:
+    """Detect *min_runs* consecutive closed runs with no artifacts.
+
+    Checks the ``metadata.artifacts`` field on each run.  Returns a
+    detection dict when all of the last *min_runs* runs have empty
+    artifacts, ``None`` otherwise.
+    """
+    rows = conn.execute(
+        "SELECT id, metadata, outcome FROM task_runs "
+        "WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY ended_at DESC LIMIT ?",
+        (task_id, min_runs),
+    ).fetchall()
+    if len(rows) < min_runs:
+        return None
+    empty_count = 0
+    for r in rows:
+        try:
+            meta = json.loads(r["metadata"]) if r["metadata"] else {}
+        except Exception:
+            meta = {}
+        if not meta.get("artifacts"):
+            empty_count += 1
+    if empty_count >= min_runs:
+        return {
+            "reason": (
+                f"no_output: {empty_count}/{len(rows)} consecutive runs "
+                f"produced no artifacts"
+            ),
+            "details": {
+                "empty_runs": empty_count,
+                "total_runs_checked": len(rows),
+                "min_required": min_runs,
+            },
+        }
+    return None
+
+
+def check_early_giveup(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    enable_repeated_error: bool = True,
+    enable_token_anomaly: bool = True,
+    enable_no_output: bool = True,
+    token_threshold: int = 50000,
+    no_output_min_runs: int = 3,
+) -> Optional[dict]:
+    """Check all smart gave_up conditions (M2-1).
+
+    Each condition can be independently toggled so operators can disable
+    false-positive-prone checks without touching the others.  Returns the
+    first detection or ``None`` when no condition fires.
+    """
+    if enable_repeated_error:
+        d = detect_repeated_verification_errors(conn, task_id)
+        if d:
+            return d
+    if enable_token_anomaly:
+        d = detect_token_anomaly(conn, task_id, threshold=token_threshold)
+        if d:
+            return d
+    if enable_no_output:
+        d = detect_no_output(conn, task_id, min_runs=no_output_min_runs)
+        if d:
+            return d
+    return None
+
+
+# ---------------------------------------------------------------------------
+# M2-2: Board-level convergence detection — pure function
+# ---------------------------------------------------------------------------
+
+def compute_board_convergence(
+    conn: sqlite3.Connection,
+    *,
+    blocked_ratio_threshold: float = 0.2,
+    resolve_rate_threshold: float = 0.8,
+) -> dict:
+    """Compute board-level convergence metrics (pure function, no side effects).
+
+    Counts non-archived tasks by status, tallies ``verification_failed``
+    and ``remediation_created`` events, and evaluates the convergence
+    predicate::
+
+        converged = AND(
+            new_tasks_created == 0,
+            blocked_ratio  < threshold,
+            resolve_rate   > threshold,
+            verification_failed == 0,
+        )
+
+    Returns a dict with all metrics + the boolean ``converged`` flag.
+    """
+    status_counts: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT status, COUNT(*) AS n FROM tasks "
+        "WHERE status != 'archived' GROUP BY status"
+    ):
+        status_counts[row["status"]] = int(row["n"])
+    total = sum(status_counts.values())
+
+    resolved = status_counts.get("done", 0)
+    blocked = status_counts.get("blocked", 0)
+    running = status_counts.get("running", 0)
+    ready = status_counts.get("ready", 0)
+
+    blocked_ratio = blocked / total if total > 0 else 0.0
+    resolve_rate = resolved / total if total > 0 else 0.0
+
+    vf_row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_events WHERE kind = 'verification_failed'"
+    ).fetchone()
+    verification_failed = int(vf_row["n"]) if vf_row else 0
+
+    rt_row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_events WHERE kind = 'remediation_created'"
+    ).fetchone()
+    new_tasks_created = int(rt_row["n"]) if rt_row else 0
+
+    converged = (
+        total > 0
+        and new_tasks_created == 0
+        and blocked_ratio < blocked_ratio_threshold
+        and resolve_rate > resolve_rate_threshold
+        and verification_failed == 0
+    )
+
+    return {
+        "total_tasks": total,
+        "resolved": resolved,
+        "blocked": blocked,
+        "running": running,
+        "ready": ready,
+        "blocked_ratio": round(blocked_ratio, 4),
+        "resolve_rate": round(resolve_rate, 4),
+        "new_tasks_created": new_tasks_created,
+        "verification_failed": verification_failed,
+        "converged": converged,
+    }
+
+
+# ---------------------------------------------------------------------------
+# M2-3: task_loop_closed event writer
+# ---------------------------------------------------------------------------
+
+def record_task_loop_closed(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    metrics: dict,
+    loop_depth: int = 0,
+    duration_seconds: int = 0,
+    task_loop_id: Optional[str] = None,
+) -> None:
+    """Write a ``task_loop_closed`` event with a structured payload (M2-3).
+
+    Called from :class:`EpochEngine` when convergence is detected or the
+    loop budget is exhausted.  The payload includes all convergence
+    metrics plus loop-depth and duration for downstream learning.
+    """
+    from hermes_cli import kanban_db as _kb
+    payload = {
+        "task_loop_id": task_loop_id,
+        "total_tasks": metrics.get("total_tasks", 0),
+        "resolved": metrics.get("resolved", 0),
+        "blocked": metrics.get("blocked", 0),
+        "new_tasks_created": metrics.get("new_tasks_created", 0),
+        "verification_failed": metrics.get("verification_failed", 0),
+        "converged": metrics.get("converged", False),
+        "loop_depth": loop_depth,
+        "duration_seconds": duration_seconds,
+    }
+    with _kb.write_txn(conn):
+        _kb._append_event(conn, task_id, "task_loop_closed", payload)
+
+
+# ---------------------------------------------------------------------------
+# M3-1: Notify parent tasks on child verification failure
+# ---------------------------------------------------------------------------
+
+def _build_failure_summary(failures: list[dict]) -> str:
+    """Build a concise one-line summary from verification failure results.
+
+    Caps at 3 commands and truncates each stderr head to 120 chars so the
+    notification stays compact — the parent thread should not absorb the
+    child's entire failure detail (that would bloat parent context).
+    """
+    if not failures:
+        return "verification failed (no command details)"
+    parts: list[str] = []
+    for f in failures[:3]:
+        cmd = str(f.get("cmd", "?"))
+        exit_code = f.get("exit_code", "?")
+        stderr_head = str(f.get("stderr", ""))[:120]
+        parts.append(f"`{cmd}` exit={exit_code}: {stderr_head}")
+    return "; ".join(parts)
+
+
+def notify_parents_on_verification_failure(
+    conn: sqlite3.Connection,
+    kb_module,
+    task_id: str,
+    *,
+    failures: list[dict],
+    loop_depth: int,
+) -> int:
+    """Write a notification comment to each parent of *task_id* (M3-1).
+
+    Called when a child task's verification fails.  Looks up parents via
+    ``task_links``, builds a concise summary, and writes a comment to each
+    parent task's thread.
+
+    This function is **notification-only** — it does NOT modify parent
+    task status.  Parent status is managed by the existing dependency
+    mechanism (promotion, blocking, etc.).
+
+    Returns the number of parents notified.
+
+    Edge cases handled:
+    - No parents → returns 0 (no-op).
+    - Parent doesn't exist / is archived → skipped silently.
+    - Cycle (A→B→A) → impossible: ``task_links`` enforces DAG invariant
+      via ``_would_create_cycle``, so notification never loops.
+    """
+    parent_list = kb_module.parent_ids(conn, task_id)
+    if not parent_list:
+        return 0
+
+    child_task = kb_module.get_task(conn, task_id)
+    child_title = child_task.title if child_task else task_id
+
+    failure_summary = _build_failure_summary(failures)
+    notified = 0
+
+    for parent_id in parent_list:
+        parent_task = kb_module.get_task(conn, parent_id)
+        if parent_task is None:
+            continue
+        if getattr(parent_task, "status", None) == "archived":
+            continue
+
+        body = (
+            f"⚠️ 子任务 [{child_title}] 验证失败 "
+            f"(loop {loop_depth + 1})\n"
+            f"失败原因: {failure_summary}"
+        )
+        try:
+            kb_module.add_comment(
+                conn, parent_id,
+                author="task-loop-system",
+                body=body,
+            )
+            notified += 1
+            logger.info(
+                "M3-1: notified parent %s about child %s verification failure",
+                parent_id, task_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "M3-1: failed to notify parent %s for child %s: %s",
+                parent_id, task_id, exc,
+            )
+
+    return notified
+
+
+class EpochState:
+    """Conceptual epoch lifecycle phases.
+
+    Documents the intended state machine for loop engineering.  M0
+    implements IDLE → COLLECTING → INJECTING → (fire-and-forget back to
+    IDLE).  WAITING / EVALUATING / CLOSED are reserved for M2
+    convergence-detection work and are not yet exercised at runtime.
+    """
+
+    IDLE = "idle"              # No terminal events; waiting for work.
+    COLLECTING = "collecting"  # Terminal events detected; cooldown window.
+    INJECTING = "injecting"    # Synthesizing + dispatching orchestrator msg.
+    WAITING = "waiting"        # Orchestrator processing the injection.
+    EVALUATING = "evaluating"  # Checking convergence / new tasks / blocked.
+    CLOSED = "closed"          # Epoch budget exhausted; reset counters.
+
+
+class EpochEngine:
+    """Orchestrator epoch-detection + message-injection engine.
+
+    Extracted behavior-neutrally from ``GatewayKanbanWatchersMixin.
+    _kanban_orchestrator_callback`` (was ~450 lines).  The engine detects
+    when a board transitions from active work to idle (all terminal
+    events processed, no ready tasks blocking), then injects a synthetic
+    ``MessageEvent`` into the orchestrator profile's session so it can
+    plan the next epoch.
+
+    Per-board tracking state that was previously class-level mutable
+    defaults on the mixin (Bug #6) now lives here as instance attributes,
+    so each ``GatewayRunner`` gets its own isolated engine.
+
+    The conceptual state machine (:class:`EpochState`) is documented but
+    not yet enforced at runtime — the ``tick`` method performs the full
+    IDLE → COLLECTING → INJECTING cycle in one pass.  M2 will split this
+    into discrete transitions with convergence evaluation.
+    """
+
+    def __init__(self) -> None:
+        # Per-board cooldown / anti-loop state.
+        self._cooldowns: dict[str, float] = {}
+        self._stale_counts: dict[str, int] = {}
+        self._epoch_counts: dict[str, int] = {}
+        self._last_event_id: dict[str, int] = {}
+
+    async def tick(
         self,
+        gateway,
         deliveries: list[dict],
         kanban_cfg: dict,
     ) -> None:
@@ -59,15 +475,6 @@ class GatewayKanbanWatchersMixin:
         it scans the task tables directly. All connected home channels
         receive the epoch decision push automatically.
 
-        As part of the callback, also auto-completes any parent task
-        whose children are all in a terminal state (see
-        :func:`hermes_cli.kanban_db.auto_complete_parents`). This is the
-        Phase-1 wiring for "implement done + verify done → parent done
-        automatically" — a parent card with two leaf children (one
-        implementation card and one verification card) is marked
-        ``done`` by the watcher without needing an explicit
-        ``kanban_complete`` from the worker.
-
         Configuration (in config.yaml under ``kanban:``):
 
         - ``orchestrator_notify: true`` — enable this callback.
@@ -80,719 +487,537 @@ class GatewayKanbanWatchersMixin:
         - ``orchestrator_max_stale: 3`` — max consecutive stale triggers
           before the board is suppressed until a real event arrives.
         """
+        from hermes_cli import kanban_db as _kb
+
         cooldown_seconds = float(kanban_cfg.get("orchestrator_cooldown_seconds", 30))
+        MAX_CONSECUTIVE_STALE = int(kanban_cfg.get("orchestrator_max_stale", 3))
         MAX_EPOCHS = int(kanban_cfg.get("orchestrator_max_epochs", 10))
-        # Force-trigger threshold (Phase 2 rule 3). When a task on a
-        # board has accumulated this many consecutive failures, the
-        # epoch callback must inject LLM help *even if* the board has
-        # other ready cards waiting — the failure pathology won't fix
-        # itself.
-        FORCE_FAILURE_THRESHOLD = int(
-            kanban_cfg.get("orchestrator_force_failure_threshold", 3)
-        )
 
-        now = time.monotonic()
-
-        candidate_boards = self._scan_candidate_boards(kanban_cfg)
-
-        for slug in candidate_boards:
-            # Cooldown gate.
-            if now - self._orch_cb_cooldowns.get(slug, 0) < cooldown_seconds:
-                continue
-
-            last_eid = self._orch_cb_last_event_id.get(slug, 0)
-            stats = self._detect_epoch(slug, last_eid, now=now, max_epochs=MAX_EPOCHS)
-            if stats is None:
-                continue
-
-            # Phase 2 rule 1: skip when the ready queue is non-empty AND
-            # there are no terminal events to react to. Dispatcher picks
-            # up ready cards on its own tick; calling LLM here just
-            # wastes tokens.
-            #
-            # Phase 2 rule 3: but if any task on this board has hit
-            # ``consecutive_failures >= FORCE_FAILURE_THRESHOLD``, force
-            # the trigger — failures don't heal themselves and the
-            # LLM needs to step in even when other work is queued.
-            force_urgent = self._has_force_failure(
-                slug, FORCE_FAILURE_THRESHOLD,
-            )
-            if (
-                stats["ready_count"] > 0
-                and not stats["has_terminal_events"]
-                and not force_urgent
-            ):
-                logger.debug(
-                    "kanban orchestrator callback: board %s has %d ready card(s) "
-                    "and no terminal events; skipping LLM injection (dispatcher "
-                    "will handle it)",
-                    slug, stats["ready_count"],
-                )
-                continue
-
-            # Mark the stats dict so the message builder / injector can
-            # tag the trigger as urgent and surface the failing task ids
-            # to the orchestrator up front.
-            stats["force_urgent"] = bool(force_urgent)
-            if force_urgent:
-                stats["force_failure_threshold"] = FORCE_FAILURE_THRESHOLD
-                failing_ids = self._failing_task_ids(slug, FORCE_FAILURE_THRESHOLD)
-                stats["failing_task_ids"] = failing_ids
-
-            # Phase-1 parent auto-completion. If any of the events we
-            # just observed were leaves of a parent card, the parent
-            # may have just become eligible for an automatic
-            # transition to ``done``. Returns the list of parents we
-            # flipped so the notification can mention them.
-            stats["auto_completed"] = self._auto_complete_parents(
-                slug, stats["event_details"],
-            )
-
-            msg_text = self._build_epoch_message(slug, stats["event_details"], stats)
-            self._inject_epoch(msg_text, slug, stats)
-
-    def _auto_complete_parents(
-        self, board_slug: str, event_details: list,
-    ) -> list[str]:
-        """Auto-complete any parent whose children all reached a terminal state.
-
-        Walks the ``task_links`` graph upward from every task id in
-        ``event_details`` and flips the corresponding parents to
-        ``done`` when ALL of their children are in a terminal status.
-        See :func:`hermes_cli.kanban_db.auto_complete_parents` for the
-        gating rules (parent must be ``running``, all children must be
-        terminal, all of the parent's own parents must be terminal).
-
-        Returns the (possibly-empty) list of parent task ids the watcher
-        just auto-completed. Failures are logged and swallowed — a
-        broken auto-completion must never block the orchestrator
-        callback or the downstream epoch notification.
-        """
-        if not event_details:
-            return []
-        from hermes_cli import kanban_db as _kb
-
-        task_ids: list[str] = []
-        for ed in event_details:
-            tid = ed.get("task_id")
-            if isinstance(tid, str) and tid.strip():
-                task_ids.append(tid)
-        if not task_ids:
-            return []
-
-        try:
-            conn = _kb.connect(board=board_slug)
-        except Exception as exc:
-            logger.debug(
-                "kanban orchestrator callback: cannot open %s for parent "
-                "auto-completion: %s",
-                board_slug, exc,
-            )
-            return []
-        try:
-            auto_completed = _kb.auto_complete_parents(conn, task_ids)
-        except Exception as exc:
-            logger.warning(
-                "kanban orchestrator callback: auto_complete_parents "
-                "failed on board %s: %s",
-                board_slug, exc,
-            )
-            auto_completed = []
-        finally:
-            conn.close()
-        if auto_completed:
-            logger.info(
-                "kanban orchestrator callback: auto-completed %d parent(s) "
-                "on board %s: %s",
-                len(auto_completed), board_slug, ", ".join(auto_completed),
-            )
-        return auto_completed
-
-    def _inject_epoch(self, msg_text: str, slug: str, stats: dict) -> None:
-        """Schedule epoch injection into the user's session (fire-and-forget).
-
-        Looks up the last kanban-interaction source for *slug*, builds a
-        synthetic ``MessageEvent``, and schedules a background task that
-        processes the event through the agent and delivers a combined
-        summary + response via the platform adapter.
-
-        ``stats`` is the dict returned by :meth:`_detect_epoch`.
-        """
-        event_details = stats["event_details"]
-        current_epoch = stats["current_epoch"]
-        MAX_EPOCHS = stats["MAX_EPOCHS"]
-        ready_count = stats["ready_count"]
-
-        try:
-            from gateway.config import Platform as _Platform
-            from gateway.platforms.base import MessageEvent, SessionSource
-
-            _src_map = getattr(self, "_kanban_last_user_source", {})
-            last_src = _src_map.get(slug)
-
-            if not last_src or not last_src[0]:
-                logger.debug(
-                    "kanban orchestrator callback: no source for board %s, skipping",
-                    slug,
-                )
-                return
-
-            _plat_str, _chat_id = last_src
-            try:
-                epoch_platform = _Platform(_plat_str)
-            except ValueError:
-                logger.warning(
-                    "kanban orchestrator callback: invalid platform %s for board %s",
-                    _plat_str, slug,
-                )
-                return
-
-            source = SessionSource(
-                platform=epoch_platform,
-                chat_id=_chat_id,
-                chat_type="private",
-                user_id="system",
-                user_name="kanban-orchestrator",
-            )
-
-            synthetic_event = MessageEvent(
-                text=msg_text,
-                source=source,
-                internal=True,
-            )
-
-            logger.info(
-                "kanban orchestrator callback: injecting into %s/%s "
-                "for board %s (epoch %d/%d)",
-                _plat_str, _chat_id, slug, current_epoch, MAX_EPOCHS,
-            )
-
-            try:
-                # Build user-facing event summary sent alongside the
-                # agent response after the epoch is processed.
-                _kind_emoji = {
-                    "completed": "✅", "blocked": "⚠️",
-                    "crashed": "❌", "gave_up": "💀", "timed_out": "⏰",
-                }
-                summary_parts = [f"🔄 **Epoch #{current_epoch}** `{slug}`"]
-                for ed in event_details:
-                    emoji = _kind_emoji.get(ed["kind"], "📌")
-                    line = f"{emoji} `{ed['task_id']}` {ed['kind']} (@{ed['assignee']})"
-                    if ed["summary"]:
-                        line += f"\n   {ed['summary'][:200]}"
-                    summary_parts.append(line)
-                if ready_count > 0:
-                    summary_parts.append(f"📋 待处理: {ready_count}")
-                summary_parts.append(f"_(epoch {current_epoch}/{MAX_EPOCHS})_")
-
-                adapter = self.adapters.get(epoch_platform)
-
-                # Inject into session WITHOUT blocking the notifier loop.
-                # A synchronous await here would queue user messages behind
-                # the epoch processing, causing multi-minute delays.
-                # fire-and-forget lets the agent handle it asynchronously.
-
-                async def _epoch_inject():
-                    """Process epoch injection and send combined response."""
-                    try:
-                        response_text = await self._handle_message(synthetic_event)
-                    except Exception as exc:
-                        logger.warning("kanban epoch injection failed: %s", exc)
-                        return
-
-                    # Combine summary + agent response into ONE message.
-                    summary_parts.append("")
-                    if response_text:
-                        summary_parts.append(f"📋 **处理结果:**\n{response_text[:500]}")
-
-                    combined_msg = "\n".join(summary_parts)
-
-                    if adapter:
-                        send_result = await adapter.send(
-                            chat_id=_chat_id, content=combined_msg,
-                        )
-                        if send_result and getattr(send_result, "success", False):
-                            logger.info(
-                                "kanban epoch: sent to %s/%s (epoch %d/%d)",
-                                _plat_str, _chat_id, current_epoch, MAX_EPOCHS,
-                            )
-                        else:
-                            err = getattr(send_result, "error", "unknown") if send_result else "no result"
-                            logger.warning(
-                                "kanban epoch: send to %s/%s FAILED: %s",
-                                _plat_str, _chat_id, err,
-                            )
-
-                # Schedule as a background task — don't block notifier.
-                asyncio.ensure_future(_epoch_inject())
-                logger.info(
-                    "kanban epoch: scheduled injection for %s/%s (epoch %d/%d, fire-and-forget)",
-                    _plat_str, _chat_id, current_epoch, MAX_EPOCHS,
-                )
-            except Exception as orch_exc:
-                logger.warning(
-                    "kanban orchestrator callback: failed for board %s: %s",
-                    slug, orch_exc,
-                )
-        except Exception as import_exc:
-            logger.warning(
-                "kanban orchestrator callback: import error for board %s: %s",
-                slug, import_exc,
-            )
-
-    def _scan_candidate_boards(self, kanban_cfg: dict) -> list[str]:
-        """Determine candidate boards for orchestrator epoch checks.
-
-        Honors ``orchestrator_boards`` allowlist (defaulting to ``[]`` on a
-        non-list value); otherwise scans ``~/.hermes/kanban/boards/`` for
-        directories (skipping ``_``/``.`` prefixed names). The default board
-        is always included so the main kanban DB is never skipped.
-        """
-        from hermes_cli import kanban_db as _kb
+        orchestrator = (kanban_cfg.get("orchestrator_profile") or "").strip()
+        if not orchestrator:
+            orchestrator = gateway._active_profile_name()
 
         board_allowlist = kanban_cfg.get("orchestrator_boards", [])
         if not isinstance(board_allowlist, list):
             board_allowlist = []
 
+        now = time.monotonic()
+
+        # Build event lookup from deliveries (may be empty — that's fine).
+        # Used to summarize what happened in the epoch message.
+        events_by_board: dict[str, list] = {}
+        for d in deliveries:
+            slug = d.get("board")
+            if slug:
+                events_by_board.setdefault(slug, []).extend(d.get("events", []))
+
+        # Determine candidate boards: scan ALL boards (allowlist or
+        # discovered), not just boards with deliveries. This is the key
+        # fix — epoch detection must not depend on subscription tables.
         if board_allowlist:
-            return list(board_allowlist)
-
-        import os as _os
-        boards_dir = _os.path.expanduser("~/.hermes/kanban/boards")
-        candidate_boards: list[str] = []
-        if _os.path.isdir(boards_dir):
-            for name in sorted(_os.listdir(boards_dir)):
-                if name.startswith("_") or name.startswith("."):
-                    continue
-                if _os.path.isdir(_os.path.join(boards_dir, name)):
-                    candidate_boards.append(name)
-        # Always include default board (stored in main kanban.db).
-        if _kb.DEFAULT_BOARD not in candidate_boards:
-            candidate_boards.append(_kb.DEFAULT_BOARD)
-        return candidate_boards
-
-    def _rescue_orphans(self, board_slug: str) -> int:
-        """Re-parent/detach orphaned todo children of blocked tasks.
-
-        For each blocked task, find todo children stuck because the parent
-        never reaches 'done'. Try re-parenting to a done grandparent first
-        (preserves context); otherwise detach entirely. Commits and logs.
-        Returns the count of orphans processed (re-parented + detached).
-        """
-        from hermes_cli import kanban_db as _kb
-
-        rescued = 0
-        try:
-            conn = _kb.connect(board=board_slug)
-            try:
-                blocked_tasks = _kb.list_tasks(conn, status="blocked") or []
-                for bt in blocked_tasks:
-                    # Find todo children of this blocked task.
-                    orphan_rows = conn.execute(
-                        "SELECT t.id FROM tasks t "
-                        "JOIN task_edges e ON e.child_id = t.id "
-                        "WHERE e.parent_id = ? AND t.status = 'todo'",
-                        (bt.id,),
-                    ).fetchall()
-                    for orow in orphan_rows:
-                        orphan_id = orow[0]
-                        # Try re-parenting to grandparent (done tasks only).
-                        gp_row = conn.execute(
-                            "SELECT e2.parent_id, t2.status FROM task_edges e "
-                            "JOIN task_edges e2 ON e2.child_id = e.parent_id "
-                            "JOIN tasks t2 ON t2.id = e2.parent_id "
-                            "WHERE e.child_id = ?",
-                            (orphan_id,),
-                        ).fetchone()
-                        if gp_row and gp_row[0] and gp_row[1] == "done":
-                            # Grandparent exists and is done — re-parent.
-                            conn.execute(
-                                "DELETE FROM task_edges WHERE parent_id=? AND child_id=?",
-                                (bt.id, orphan_id),
-                            )
-                            conn.execute(
-                                "INSERT OR IGNORE INTO task_edges(parent_id, child_id) VALUES(?,?)",
-                                (gp_row[0], orphan_id),
-                            )
-                            logger.info(
-                                "kanban epoch: re-parented orphan %s "
-                                "from blocked %s to grandparent %s",
-                                orphan_id, bt.id, gp_row[0],
-                            )
-                        else:
-                            # No suitable grandparent — detach entirely.
-                            conn.execute(
-                                "DELETE FROM task_edges WHERE parent_id=? AND child_id=?",
-                                (bt.id, orphan_id),
-                            )
-                            logger.info(
-                                "kanban epoch: detached orphan %s from blocked %s",
-                                orphan_id, bt.id,
-                            )
-                        rescued += 1
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception as rescue_exc:
-            logger.debug("kanban epoch: orphan rescue failed: %s", rescue_exc)
-        return rescued
-
-    def _detect_epoch(
-        self, board_slug: str, last_eid: int, *, now: float, max_epochs: int,
-    ) -> dict | None:
-        """Per-board epoch detection + bookkeeping.
-
-        Queries running/ready/blocked tasks and recent terminal events,
-        decides whether an epoch should fire, and (when it does) resets the
-        stale counter, runs orphan rescue, advances the per-board epoch
-        counter, and records cooldown / last-event-id state.
-
-        Returns a stats dict on trigger, or None when the board is skipped
-        (idle, no terminal events, over the epoch limit, or a DB error) —
-        mirroring the original per-board ``continue`` skips.
-        """
-        from hermes_cli import kanban_db as _kb
-
-        # Count in-progress and ready tasks on this board.
-        try:
-            conn = _kb.connect(board=board_slug)
-            try:
-                tasks = _kb.list_tasks(conn, status="running")
-                in_progress_count = len(tasks) if tasks else 0
-                ready_tasks = _kb.list_tasks(conn, status="ready")
-                ready_count = len(ready_tasks) if ready_tasks else 0
-                # Check for recent terminal events since last epoch trigger.
-                # Uses per-board last_event_id to avoid re-triggering on
-                # old events. Falls back to 600s window on first run.
-                if last_eid > 0:
-                    recent_event_rows = conn.execute(
-                        "SELECT te.id, te.task_id, te.kind, te.payload "
-                        "FROM task_events te WHERE te.id > ? "
-                        "AND te.kind IN ('completed','blocked','crashed','gave_up','timed_out') "
-                        "ORDER BY te.id DESC LIMIT 20",
-                        (last_eid,),
-                    ).fetchall()
-                else:
-                    cutoff = time.time() - 600
-                    recent_event_rows = conn.execute(
-                        "SELECT te.id, te.task_id, te.kind, te.payload "
-                        "FROM task_events te WHERE te.created_at > ? "
-                        "AND te.kind IN ('completed','blocked','crashed','gave_up','timed_out') "
-                        "ORDER BY te.created_at DESC LIMIT 20",
-                        (cutoff,),
-                    ).fetchall()
-                recent_events = [(r[2],) for r in recent_event_rows]  # kind-only for Counter compat
-                # Build detailed event list for user-facing summary.
-                event_details = []
-                for r in recent_event_rows:
-                    _eid, _tid, _kind, _payload = r
-                    # Get task info
-                    _tinfo = conn.execute(
-                        "SELECT title, assignee, result FROM tasks WHERE id=?", (_tid,)
-                    ).fetchone()
-                    _title = _tinfo[0] if _tinfo else "?"
-                    _assignee = _tinfo[1] if _tinfo else "?"
-                    # Extract summary from payload or task result
-                    _summary = ""
-                    if _payload:
-                        try:
-                            _p = json.loads(_payload)
-                            _summary = _p.get("summary", "")
-                        except Exception:
-                            _summary = ""
-                    if not _summary and _tinfo and _tinfo[2]:
-                        _summary = _tinfo[2][:200]
-                    event_details.append({
-                        "task_id": _tid,
-                        "kind": _kind,
-                        "title": _title,
-                        "assignee": _assignee,
-                        "summary": _summary,
-                    })
-                any_terminal = len(recent_events) > 0
-                # Query blocked count here while conn is still open.
-                blocked_count = len(_kb.list_tasks(conn, status="blocked") or [])
-            finally:
-                conn.close()
-        except Exception as exc:
-            logger.debug(
-                "kanban orchestrator callback: board %s check failed: %s",
-                board_slug, exc,
-            )
-            return None
-
-        in_progress_names = [t.id for t in (tasks or [])]
-
-        # Trigger epoch when there are terminal events AND no ready tasks.
-        # We allow triggering even with running tasks, because a running
-        # task might be an auto-re-dispatch from a crash — the orchestrator
-        # needs to know about the crash to decide next steps.
-        if not any_terminal and ready_count == 0 and in_progress_count > 0:
-            return None
-
-        # A board with 0 running tasks but also 0 ready and no recent
-        # terminal events is simply idle — skip without counting as
-        # stale. Only trigger epoch when there's actually something
-        # to act on (ready tasks to dispatch or terminal events to
-        # react to).
-        if not ready_count and not any_terminal:
-            return None
-        # Reset stale counter — something real happened.
-        self._orch_cb_stale_counts[board_slug] = 0
-
-        # Rescue orphaned children (re-parent/detach blocked-task todo kids).
-        self._rescue_orphans(board_slug)
-
-        # Epoch counter tracks active work on this board. Reset when:
-        # 1. Board is idle (no running/ready/blocked = workflow finished)
-        # 2. New terminal events arrived (fresh epoch budget per new event)
-        is_idle = (in_progress_count == 0 and ready_count == 0 and blocked_count == 0)
-        if is_idle or any_terminal:
-            self._orch_epoch_counts[board_slug] = 0
-
-        # Anti-loop: max epoch limit per "wave" — between terminal events,
-        # cap orchestrator re-dispatch attempts to avoid hot-looping.
-        current_epoch = self._orch_epoch_counts.get(board_slug, 0) + 1
-        if current_epoch > max_epochs:
-            logger.info(
-                "kanban orchestrator callback: board %s epoch limit (%d/%d); "
-                "waiting for next terminal event or new task",
-                board_slug, current_epoch - 1, max_epochs,
-            )
-            return None
-        self._orch_epoch_counts[board_slug] = current_epoch
-
-        self._orch_cb_cooldowns[board_slug] = now
-
-        # Record the max event id for this board so we only trigger on
-        # NEW terminal events next time.
-        try:
-            conn2 = _kb.connect(board=board_slug)
-            try:
-                max_eid_row = conn2.execute("SELECT MAX(id) FROM task_events").fetchone()
-                if max_eid_row and max_eid_row[0]:
-                    self._orch_cb_last_event_id[board_slug] = max_eid_row[0]
-            finally:
-                conn2.close()
-        except Exception as eid_exc:
-            logger.debug(
-                "kanban orchestrator callback: max event id update failed for %s: %s",
-                board_slug, eid_exc,
-            )
-
-        return {
-            "in_progress_count": in_progress_count,
-            "in_progress_names": in_progress_names,
-            "ready_count": ready_count,
-            "blocked_count": blocked_count,
-            "event_details": event_details,
-            "has_terminal_events": any_terminal,
-            "current_epoch": current_epoch,
-            "MAX_EPOCHS": max_epochs,
-            "max_eid": self._orch_cb_last_event_id.get(board_slug, last_eid),
-        }
-
-    def _has_force_failure(
-        self, board_slug: str, threshold: int,
-    ) -> bool:
-        """Return True if any task on the board has hit the failure threshold.
-
-        ``consecutive_failures`` is incremented by ``_record_failure`` on
-        every spawn/timeout crash path, and cleared on successful
-        completion. A value at or above ``threshold`` (default 3) is the
-        Phase 2 rule 3 signal: the worker keeps failing on the same task
-        with no progress, so the orchestrator must step in even when
-        other ready cards are waiting.
-
-        Reads ``tasks`` only (no event log join) — the column is kept
-        current by the failure paths in
-        :func:`hermes_cli.kanban_db._record_failure`. Returns False on
-        any DB error so a transient failure does not falsely force a
-        orchestrator injection.
-        """
-        from hermes_cli import kanban_db as _kb
-
-        try:
-            conn = _kb.connect(board=board_slug)
-        except Exception as exc:
-            logger.debug(
-                "kanban orchestrator callback: cannot open %s to check "
-                "force-failure threshold: %s",
-                board_slug, exc,
-            )
-            return False
-        try:
-            row = conn.execute(
-                "SELECT 1 FROM tasks "
-                "WHERE consecutive_failures >= ? "
-                "AND status IN ('ready','blocked','running') "
-                "LIMIT 1",
-                (int(threshold),),
-            ).fetchone()
-        except Exception as exc:
-            logger.debug(
-                "kanban orchestrator callback: force-failure check on "
-                "board %s failed: %s",
-                board_slug, exc,
-            )
-            return False
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-        return row is not None
-
-    def _failing_task_ids(
-        self, board_slug: str, threshold: int,
-    ) -> list[str]:
-        """Return the ids of tasks currently at/over the failure threshold.
-
-        Companion to :meth:`_has_force_failure`. Used to annotate the
-        orchestrator message so the LLM can prioritize the cards that
-        actually need triage. Failures here are advisory; a DB error
-        yields an empty list rather than raising — the caller treats it
-        as "we know something is wrong but we couldn't name it".
-        """
-        from hermes_cli import kanban_db as _kb
-
-        try:
-            conn = _kb.connect(board=board_slug)
-        except Exception as exc:
-            logger.debug(
-                "kanban orchestrator callback: cannot open %s to list "
-                "failing task ids: %s",
-                board_slug, exc,
-            )
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT id, consecutive_failures FROM tasks "
-                "WHERE consecutive_failures >= ? "
-                "AND status IN ('ready','blocked','running') "
-                "ORDER BY consecutive_failures DESC, id ASC "
-                "LIMIT 20",
-                (int(threshold),),
-            ).fetchall()
-        except Exception as exc:
-            logger.debug(
-                "kanban orchestrator callback: failing-task-id query on "
-                "board %s failed: %s",
-                board_slug, exc,
-            )
-            return []
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-        return [r[0] for r in rows]
-
-    def _build_epoch_message(
-        self, board_slug: str, events: list, stats: dict,
-    ) -> str:
-        """Build the multi-line orchestrator notification message for one epoch.
-
-        ``events`` is the ``event_details`` list (used to summarize event
-        kinds); ``stats`` carries the counts produced by ``_detect_epoch``
-        and (when applicable) the ``auto_completed`` list of parents
-        this watcher just flipped to ``done`` because all their children
-        reached a terminal state. ``stats`` may also carry
-        ``force_urgent`` (Phase 2 rule 3) and ``failing_task_ids`` —
-        when present the message is prefixed with an ``[URGENT]`` tag
-        and a short list of cards that need triage so the orchestrator
-        LLM triages them first.
-        """
-        from hermes_cli import kanban_db as _kb
-
-        current_epoch = stats["current_epoch"]
-        MAX_EPOCHS = stats["MAX_EPOCHS"]
-        ready_count = stats["ready_count"]
-        in_progress_names = stats["in_progress_names"]
-        auto_completed = stats.get("auto_completed") or []
-        force_urgent = bool(stats.get("force_urgent"))
-        failing_ids = stats.get("failing_task_ids") or []
-        force_threshold = stats.get("force_failure_threshold")
-
-        # Build the notification message with event summaries.
-        board_label = (
-            f"board={board_slug}" if board_slug != _kb.DEFAULT_BOARD else "default board"
-        )
-
-        # Summarize what happened: count by event kind from recent_events
-        event_kinds: Counter = Counter()
-        for ed in events:
-            event_kinds[ed["kind"]] += 1
-        event_summary = ", ".join(
-            f"{k}={v}" for k, v in sorted(event_kinds.items())
-        ) if event_kinds else "no events"
-
-        # Phase 2 rule 3: tag the message as urgent when at least one
-        # card on the board has hit the consecutive-failure threshold.
-        # This puts the failing cards at the top of the orchestrator's
-        # mental queue even when other ready cards are queued behind.
-        urgent_tag = "[URGENT] " if force_urgent else ""
-
-        msg_lines = [
-            f"{urgent_tag}[Kanban Epoch #{current_epoch}] Workers idle on {board_label}.",
-            f"Events this tick: {event_summary}",
-        ]
-        if force_urgent:
-            threshold_note = (
-                f">= {force_threshold} failures"
-                if force_threshold is not None
-                else "over the failure threshold"
-            )
-            preview = ", ".join(failing_ids[:8])
-            suffix = "" if len(failing_ids) <= 8 else f" (+{len(failing_ids) - 8} more)"
-            msg_lines.append(
-                f"🚨 Stuck tasks ({threshold_note}): {preview}{suffix}"
-            )
-        if in_progress_names:
-            msg_lines.append(f"Running tasks: {len(in_progress_names)} ({', '.join(in_progress_names[:5])})")
-        if auto_completed:
-            # Phase-1 auto-completion summary: parents that flipped to
-            # done because all their children reached a terminal state.
-            # Truncate the id list to keep the message bounded; the
-            # full list is on the per-task ``completed`` event payload.
-            preview = ", ".join(auto_completed[:8])
-            suffix = "" if len(auto_completed) <= 8 else f" (+{len(auto_completed) - 8} more)"
-            msg_lines.append(
-                f"🤖 Auto-completed parents: {preview}{suffix}"
-            )
-        if ready_count > 0:
-            msg_lines.append(
-                f"{ready_count} ready task(s) queued — decompose and dispatch."
-            )
+            candidate_boards = list(board_allowlist)
         else:
-            msg_lines.append(
-                "No ready tasks. Review blocked/crashed tasks and re-decompose if needed."
-            )
-        msg_lines.append(f"(epoch {current_epoch}/{MAX_EPOCHS})")
+            # Discover all boards from the kanban boards directory.
+            import os as _os
+            boards_dir = _os.path.expanduser("~/.hermes/kanban/boards")
+            candidate_boards = []
+            if _os.path.isdir(boards_dir):
+                for name in sorted(_os.listdir(boards_dir)):
+                    if name.startswith("_") or name.startswith("."):
+                        continue
+                    if _os.path.isdir(_os.path.join(boards_dir, name)):
+                        candidate_boards.append(name)
+            # Always include default board (stored in main kanban.db).
+            if _kb.DEFAULT_BOARD not in candidate_boards:
+                candidate_boards.append(_kb.DEFAULT_BOARD)
 
-        # Orchestrator instructions — the LLM receives this as the user message.
-        msg_lines.append("")
-        msg_lines.append("--- Orchestrator Instructions ---")
-        msg_lines.append(f"Board '{board_slug}': {ready_count} ready, {len(in_progress_names)} running")
-        if force_urgent:
+        for slug in candidate_boards:
+            # Cooldown gate.
+            if now - self._cooldowns.get(slug, 0) < cooldown_seconds:
+                continue
+
+            # Count in-progress and ready tasks on this board.
+            try:
+                conn = _kb.connect(board=slug)
+                try:
+                    tasks = _kb.list_tasks(conn, status="running")
+                    in_progress_count = len(tasks) if tasks else 0
+                    ready_tasks = _kb.list_tasks(conn, status="ready")
+                    ready_count = len(ready_tasks) if ready_tasks else 0
+                    # Check for recent terminal events since last epoch trigger.
+                    # Uses per-board last_event_id to avoid re-triggering on
+                    # old events. Falls back to 600s window on first run.
+                    last_eid = self._last_event_id.get(slug, 0)
+                    if last_eid > 0:
+                        recent_event_rows = conn.execute(
+                            "SELECT te.id, te.task_id, te.kind, te.payload "
+                            "FROM task_events te WHERE te.id > ? "
+                            "AND te.kind IN ('completed','blocked','crashed','gave_up','timed_out') "
+                            "ORDER BY te.id DESC LIMIT 20",
+                            (last_eid,),
+                        ).fetchall()
+                    else:
+                        cutoff = time.time() - 600
+                        recent_event_rows = conn.execute(
+                            "SELECT te.id, te.task_id, te.kind, te.payload "
+                            "FROM task_events te WHERE te.created_at > ? "
+                            "AND te.kind IN ('completed','blocked','crashed','gave_up','timed_out') "
+                            "ORDER BY te.created_at DESC LIMIT 20",
+                            (cutoff,),
+                        ).fetchall()
+                    recent_events = [(r[2],) for r in recent_event_rows]  # kind-only for Counter compat
+                    # Build detailed event list for user-facing summary.
+                    event_details = []
+                    for r in recent_event_rows:
+                        _eid, _tid, _kind, _payload = r
+                        # Get task info
+                        _tinfo = conn.execute(
+                            "SELECT title, assignee, result FROM tasks WHERE id=?", (_tid,)
+                        ).fetchone()
+                        _title = _tinfo[0] if _tinfo else "?"
+                        _assignee = _tinfo[1] if _tinfo else "?"
+                        # Extract summary from payload or task result
+                        _summary = ""
+                        if _payload:
+                            try:
+                                _p = json.loads(_payload)
+                                _summary = _p.get("summary", "")
+                            except Exception:
+                                _summary = ""
+                        if not _summary and _tinfo and _tinfo[2]:
+                            _summary = _tinfo[2][:200]
+                        event_details.append({
+                            "task_id": _tid,
+                            "kind": _kind,
+                            "title": _title,
+                            "assignee": _assignee,
+                            "summary": _summary,
+                        })
+                    any_terminal = len(recent_events) > 0
+                    # Query blocked count here while conn is still open.
+                    blocked_count = len(_kb.list_tasks(conn, status="blocked") or [])
+                finally:
+                    conn.close()
+            except Exception as exc:
+                logger.debug(
+                    "kanban orchestrator callback: board %s check failed: %s",
+                    slug, exc,
+                )
+                continue
+
+            # Trigger epoch when there are terminal events AND no ready tasks.
+            # We allow triggering even with running tasks, because a running
+            # task might be an auto-re-dispatch from a crash — the orchestrator
+            # needs to know about the crash to decide next steps.
+            if not any_terminal and ready_count == 0 and in_progress_count > 0:
+                continue
+
+            # A board with 0 running tasks but also 0 ready and no recent
+            # terminal events is simply idle — skip without counting as
+            # stale. Only trigger epoch when there's actually something
+            # to act on (ready tasks to dispatch or terminal events to
+            # react to).
+            if not ready_count and not any_terminal:
+                continue
+            # Reset stale counter — something real happened.
+            self._stale_counts[slug] = 0
+
+            # Rescue orphaned children: if a task is blocked and has
+            # children stuck in 'todo' (because parent isn't 'done'),
+            # detach them so they become independent tasks. This prevents
+            # deadlocks: tester blocks → creates fix task as child →
+            # fix task stuck because blocked parent never reaches 'done'.
+            # Try re-parenting to grandparent first (preserves context);
+            # if no grandparent or grandparent not done, just detach.
+            try:
+                conn = _kb.connect(board=slug)
+                try:
+                    blocked_tasks = _kb.list_tasks(conn, status="blocked") or []
+                    for bt in blocked_tasks:
+                        # Find todo children of this blocked task.
+                        orphan_rows = conn.execute(
+                            "SELECT t.id FROM tasks t "
+                            "JOIN task_edges e ON e.child_id = t.id "
+                            "WHERE e.parent_id = ? AND t.status = 'todo'",
+                            (bt.id,),
+                        ).fetchall()
+                        for orow in orphan_rows:
+                            orphan_id = orow[0]
+                            # Try re-parenting to grandparent (done tasks only).
+                            gp_row = conn.execute(
+                                "SELECT e2.parent_id, t2.status FROM task_edges e "
+                                "JOIN task_edges e2 ON e2.child_id = e.parent_id "
+                                "JOIN tasks t2 ON t2.id = e2.parent_id "
+                                "WHERE e.child_id = ?",
+                                (orphan_id,),
+                            ).fetchone()
+                            if gp_row and gp_row[0] and gp_row[1] == "done":
+                                # Grandparent exists and is done — re-parent.
+                                conn.execute(
+                                    "DELETE FROM task_edges WHERE parent_id=? AND child_id=?",
+                                    (bt.id, orphan_id),
+                                )
+                                conn.execute(
+                                    "INSERT OR IGNORE INTO task_edges(parent_id, child_id) VALUES(?,?)",
+                                    (gp_row[0], orphan_id),
+                                )
+                                logger.info(
+                                    "kanban epoch: re-parented orphan %s "
+                                    "from blocked %s to grandparent %s",
+                                    orphan_id, bt.id, gp_row[0],
+                                )
+                            else:
+                                # No suitable grandparent — detach entirely.
+                                conn.execute(
+                                    "DELETE FROM task_edges WHERE parent_id=? AND child_id=?",
+                                    (bt.id, orphan_id),
+                                )
+                                logger.info(
+                                    "kanban epoch: detached orphan %s from blocked %s",
+                                    orphan_id, bt.id,
+                                )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as rescue_exc:
+                logger.debug("kanban epoch: orphan rescue failed: %s", rescue_exc)
+
+            # Epoch counter tracks active work on this board. Reset when:
+            # 1. Board is idle (no running/ready/blocked = workflow finished)
+            # 2. New terminal events arrived (fresh epoch budget per new event)
+            is_idle = (in_progress_count == 0 and ready_count == 0 and blocked_count == 0)
+            if is_idle or any_terminal:
+                self._epoch_counts[slug] = 0
+
+            current_epoch = self._epoch_counts.get(slug, 0) + 1
+
+            # ── M2-2/M2-3: Convergence detection ───────────────────
+            # Before injecting another epoch message, check whether the
+            # board has converged.  If it has, write a task_loop_closed
+            # event and skip the injection — the workflow is done.
+            try:
+                conv_conn = _kb.connect(board=slug)
+                try:
+                    metrics = compute_board_convergence(conv_conn)
+                    if metrics["converged"]:
+                        logger.info(
+                            "kanban epoch: board %s converged "
+                            "(resolved=%d/%d, blocked_ratio=%.2f, "
+                            "resolve_rate=%.2f) — writing task_loop_closed",
+                            slug, metrics["resolved"], metrics["total_tasks"],
+                            metrics["blocked_ratio"], metrics["resolve_rate"],
+                        )
+                        # Write task_loop_closed on the most recently
+                        # active task (first in recent_event_rows).
+                        _loop_tid = (
+                            recent_event_rows[0][1]
+                            if recent_event_rows else None
+                        )
+                        if _loop_tid:
+                            record_task_loop_closed(
+                                conv_conn, _loop_tid,
+                                metrics=metrics,
+                                loop_depth=current_epoch - 1,
+                                duration_seconds=int(
+                                    time.time()
+                                    - (recent_event_rows[-1][0] or 0)
+                                ) if recent_event_rows else 0,
+                                task_loop_id=f"{slug}:epoch:{current_epoch}",
+                            )
+                        # Reset epoch counter — the board converged.
+                        self._epoch_counts[slug] = 0
+                        self._cooldowns[slug] = now
+                        # Update last_event_id so we don't re-process.
+                        max_eid = conv_conn.execute(
+                            "SELECT MAX(id) FROM task_events"
+                        ).fetchone()
+                        if max_eid and max_eid[0]:
+                            self._last_event_id[slug] = max_eid[0]
+                        continue
+                finally:
+                    conv_conn.close()
+            except Exception as conv_exc:
+                logger.debug(
+                    "kanban epoch: convergence check failed for %s: %s",
+                    slug, conv_exc,
+                )
+
+            # ── M2-1: Smart gave_up detection ───────────────────────
+            # For tasks with verification failures, proactively check
+            # smart giveup conditions.  If detected, block the task with
+            # a reason containing the detection cause.
+            m2_cfg = kanban_cfg.get("task_loop", {})
+            if m2_cfg.get("smart_giveup", True):
+                try:
+                    m2_conn = _kb.connect(board=slug)
+                    try:
+                        for ev_row in recent_event_rows:
+                            _ev_tid = ev_row[1]
+                            _ev_kind = ev_row[2]
+                            if _ev_kind != "verification_failed":
+                                continue
+                            detection = check_early_giveup(
+                                m2_conn, _ev_tid,
+                                enable_repeated_error=m2_cfg.get(
+                                    "enable_repeated_error", True),
+                                enable_token_anomaly=m2_cfg.get(
+                                    "enable_token_anomaly", True),
+                                enable_no_output=m2_cfg.get(
+                                    "enable_no_output", True),
+                                token_threshold=int(m2_cfg.get(
+                                    "token_threshold", 50000)),
+                                no_output_min_runs=int(m2_cfg.get(
+                                    "no_output_min_runs", 3)),
+                            )
+                            if detection:
+                                logger.info(
+                                    "kanban epoch: smart giveup for %s: %s",
+                                    _ev_tid, detection["reason"],
+                                )
+                                reason = (
+                                    f"smart_giveup: {detection['reason']}. "
+                                    f"Task blocked to prevent wasted cycles."
+                                )
+                                _kb.block_task(
+                                    m2_conn, _ev_tid, reason=reason,
+                                )
+                    finally:
+                        m2_conn.close()
+                except Exception as sg_exc:
+                    logger.debug(
+                        "kanban epoch: smart giveup check failed for %s: %s",
+                        slug, sg_exc,
+                    )
+
+            # Anti-loop: max epoch limit per "wave" — between terminal events,
+            # cap orchestrator re-dispatch attempts to avoid hot-looping.
+            if current_epoch > MAX_EPOCHS:
+                logger.info(
+                    "kanban orchestrator callback: board %s epoch limit (%d/%d); "
+                    "waiting for next terminal event or new task",
+                    slug, current_epoch - 1, MAX_EPOCHS,
+                )
+                continue
+            self._epoch_counts[slug] = current_epoch
+
+            self._cooldowns[slug] = now
+
+            # Record the max event id for this board so we only trigger on
+            # NEW terminal events next time.
+            try:
+                conn2 = _kb.connect(board=slug)
+                try:
+                    max_eid_row = conn2.execute("SELECT MAX(id) FROM task_events").fetchone()
+                    if max_eid_row and max_eid_row[0]:
+                        self._last_event_id[slug] = max_eid_row[0]
+                finally:
+                    conn2.close()
+            except Exception as eid_exc:
+                logger.debug(
+                    "kanban orchestrator callback: max event id update failed for %s: %s",
+                    slug, eid_exc,
+                )
+
+            # Build the notification message with event summaries.
+            board_label = (
+                f"board={slug}" if slug != _kb.DEFAULT_BOARD else "default board"
+            )
+
+            # Summarize what happened: count by event kind from recent_events
+            event_kinds: Counter = Counter()
+            for ev_row in recent_events:
+                event_kinds[ev_row[0]] += 1
+            event_summary = ", ".join(
+                f"{k}={v}" for k, v in sorted(event_kinds.items())
+            ) if event_kinds else "no events"
+
+            in_progress_names = [t.id for t in (tasks or [])]
+
+            msg_lines = [
+                f"[Kanban Epoch #{current_epoch}] Workers idle on {board_label}.",
+                f"Events this tick: {event_summary}",
+            ]
+            if in_progress_names:
+                msg_lines.append(f"Running tasks: {len(in_progress_names)} ({', '.join(in_progress_names[:5])})")
+            if ready_count > 0:
+                msg_lines.append(
+                    f"{ready_count} ready task(s) queued — decompose and dispatch."
+                )
+            else:
+                msg_lines.append(
+                    "No ready tasks. Review blocked/crashed tasks and re-decompose if needed."
+                )
+            msg_lines.append(f"(epoch {current_epoch}/{MAX_EPOCHS})")
+
+            # Orchestrator instructions — the LLM receives this as the user message.
             msg_lines.append("")
-            msg_lines.append("[URGENT] One or more cards have hit the consecutive-failure threshold.")
-            msg_lines.append("Triage the stuck tasks first: inspect, re-assign, re-decompose, or unblock.")
-            msg_lines.append("These cards will keep failing in a loop until the orchestrator intervenes.")
-        msg_lines.append("")
-        msg_lines.append("As the kanban orchestrator, respond by EXECUTING tools — not by analyzing in text.")
-        msg_lines.append("You MUST make at least one tool call this turn (kanban list/show/create/unblock).")
-        msg_lines.append("Your text response will NOT be seen by anyone. Only tool results matter.")
-        msg_lines.append("")
-        msg_lines.append("Actions to take:")
-        msg_lines.append("1. Check the board — run `kanban list` or `kanban show` on blocked/crashed tasks")
-        msg_lines.append("2. For blocked: identify the blocker and decide — re-assign, re-decompose, or unblock")
-        msg_lines.append("3. For crashed/gave_up: re-dispatch the task (worker LLM may have run out of budget)")
-        msg_lines.append("4. For completed: if there are ready/pending items, create the next epoch's tasks")
-        msg_lines.append("5. Be mindful of budget — don't create too many parallel tasks at once")
-        msg_lines.append("6. Only create kanban tasks — the worker system handles execution")
-        msg_lines.append("7. Do NOT send messages to the user — results are delivered automatically")
-        return "\n".join(msg_lines)
+            msg_lines.append("--- Orchestrator Instructions ---")
+            msg_lines.append(f"Board '{slug}': {ready_count} ready, {len(in_progress_names)} running")
+            msg_lines.append("")
+            msg_lines.append("As the kanban orchestrator, respond by EXECUTING tools — not by analyzing in text.")
+            msg_lines.append("You MUST make at least one tool call this turn (kanban list/show/create/unblock).")
+            msg_lines.append("Your text response will NOT be seen by anyone. Only tool results matter.")
+            msg_lines.append("")
+            msg_lines.append("Actions to take:")
+            msg_lines.append("1. Check the board — run `kanban list` or `kanban show` on blocked/crashed tasks")
+            msg_lines.append("2. For blocked: identify the blocker and decide — re-assign, re-decompose, or unblock")
+            msg_lines.append("3. For crashed/gave_up: re-dispatch the task (worker LLM may have run out of budget)")
+            msg_lines.append("4. For completed: if there are ready/pending items, create the next epoch's tasks")
+            msg_lines.append("5. Be mindful of budget — don't create too many parallel tasks at once")
+            msg_lines.append("6. Only create kanban tasks — the worker system handles execution")
+            msg_lines.append("7. Do NOT send messages to the user — results are delivered automatically")
+            msg_text = "\n".join(msg_lines)
+
+            # Inject into the user's REAL session for this board.
+            # Unified source lookup via resolve_board_source(): tries the
+            # in-memory last-interaction source first, then falls back to
+            # the board's notify subscriptions (Bug #3/#4 unification).
+            try:
+                from gateway.config import Platform as _Platform
+                from gateway.platforms.base import MessageEvent, MessageType, SessionSource
+                from tools.kanban_tools import resolve_board_source
+
+                last_src = resolve_board_source(slug)
+
+                if not last_src or not last_src[0]:
+                    logger.debug(
+                        "kanban orchestrator callback: no source for board %s, skipping",
+                        slug,
+                    )
+                    continue
+
+                _plat_str, _chat_id = last_src
+                try:
+                    epoch_platform = _Platform(_plat_str)
+                except ValueError:
+                    logger.warning(
+                        "kanban orchestrator callback: invalid platform %s for board %s",
+                        _plat_str, slug,
+                    )
+                    continue
+
+                source = SessionSource(
+                    platform=epoch_platform,
+                    chat_id=_chat_id,
+                    chat_type="private",
+                    user_id="system",
+                    user_name="kanban-orchestrator",
+                )
+
+                synthetic_event = MessageEvent(
+                    text=msg_text,
+                    source=source,
+                    internal=True,
+                )
+
+                logger.info(
+                    "kanban orchestrator callback: injecting into %s/%s "
+                    "for board %s (epoch %d/%d)",
+                    _plat_str, _chat_id, slug, current_epoch, MAX_EPOCHS,
+                )
+
+                try:
+                    # Send user-facing event summary FIRST, so the user
+                    # knows what happened and can decide to intervene.
+                    _kind_emoji = {
+                        "completed": "✅", "blocked": "⚠️",
+                        "crashed": "❌", "gave_up": "💀", "timed_out": "⏰",
+                    }
+                    summary_parts = [f"🔄 **Epoch #{current_epoch}** `{slug}`"]
+                    for ed in event_details:
+                        emoji = _kind_emoji.get(ed["kind"], "📌")
+                        line = f"{emoji} `{ed['task_id']}` {ed['kind']} (@{ed['assignee']})"
+                        if ed["summary"]:
+                            line += f"\n   {ed['summary'][:200]}"
+                        summary_parts.append(line)
+                    if ready_count > 0:
+                        summary_parts.append(f"📋 待处理: {ready_count}")
+                    summary_parts.append(f"_(epoch {current_epoch}/{MAX_EPOCHS})_")
+
+                    summary_msg = "\n".join(summary_parts)
+
+                    adapter = gateway.adapters.get(epoch_platform)
+
+                    # Inject into session WITHOUT blocking the notifier loop.
+                    # A synchronous await here would queue user messages behind
+                    # the epoch processing, causing multi-minute delays.
+                    # fire-and-forget lets the agent handle it asynchronously.
+
+                    async def _epoch_inject():
+                        """Process epoch injection and send combined response."""
+                        try:
+                            response_text = await gateway._handle_message(synthetic_event)
+                        except Exception as exc:
+                            logger.warning("kanban epoch injection failed: %s", exc)
+                            return
+
+                        # Combine summary + agent response into ONE message.
+                        summary_parts.append("")
+                        if response_text:
+                            summary_parts.append(f"📋 **处理结果:**\n{response_text[:500]}")
+
+                        combined_msg = "\n".join(summary_parts)
+
+                        if adapter:
+                            send_result = await adapter.send(
+                                chat_id=_chat_id, content=combined_msg,
+                            )
+                            if send_result and getattr(send_result, "success", False):
+                                logger.info(
+                                    "kanban epoch: sent to %s/%s (epoch %d/%d)",
+                                    _plat_str, _chat_id, current_epoch, MAX_EPOCHS,
+                                )
+                            else:
+                                err = getattr(send_result, "error", "unknown") if send_result else "no result"
+                                logger.warning(
+                                    "kanban epoch: send to %s/%s FAILED: %s",
+                                    _plat_str, _chat_id, err,
+                                )
+
+                    # Schedule as a background task — don't block notifier.
+                    import asyncio as _aio
+                    _aio.ensure_future(_epoch_inject())
+                    logger.info(
+                        "kanban epoch: scheduled injection for %s/%s (epoch %d/%d, fire-and-forget)",
+                        _plat_str, _chat_id, current_epoch, MAX_EPOCHS,
+                    )
+                except Exception as orch_exc:
+                    logger.warning(
+                        "kanban orchestrator callback: failed for board %s: %s",
+                        slug, orch_exc,
+                    )
+            except Exception as import_exc:
+                logger.warning(
+                    "kanban orchestrator callback: import error for board %s: %s",
+                    slug, import_exc,
+                )
+
+
+class GatewayKanbanWatchersMixin:
+    """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
+
+    # Lazy-initialised epoch engine (replaces class-level mutable defaults).
+    _epoch_engine: Optional[EpochEngine] = None
+
+    @property
+    def epoch_engine(self) -> EpochEngine:
+        """Lazily create the per-instance :class:`EpochEngine`."""
+        if self._epoch_engine is None:
+            self._epoch_engine = EpochEngine()
+        return self._epoch_engine
+
+    async def _kanban_orchestrator_callback(
+        self,
+        deliveries: list[dict],
+        kanban_cfg: dict,
+    ) -> None:
+        """Delegate to :class:`EpochEngine`.
+
+        Thin wrapper preserved so existing call sites
+        (``self._kanban_orchestrator_callback(...)`` in the notifier
+        loop) continue to work without changes.
+        """
+        await self.epoch_engine.tick(self, deliveries, kanban_cfg)
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
@@ -895,7 +1120,7 @@ class GatewayKanbanWatchersMixin:
                         boards = _kb.list_boards(include_archived=False)
                     except Exception:
                         boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-                    seen_db_paths: set[str] = set()
+                    seen_db_paths: dict[str, set[str]] = {}
                     for board_meta in boards:
                         slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
                         db_path = board_meta.get("db_path")
@@ -904,12 +1129,16 @@ class GatewayKanbanWatchersMixin:
                         except Exception:
                             resolved_db_path = f"slug:{slug}"
                         if resolved_db_path in seen_db_paths:
-                            logger.debug(
-                                "kanban notifier: skipping duplicate board slug %s for DB %s",
-                                slug, resolved_db_path,
-                            )
-                            continue
-                        seen_db_paths.add(resolved_db_path)
+                            # When multiple slugs map to the same DB, we still
+                            # need to process events for EACH slug separately
+                            # — skip only truly duplicate (db_path, slug) pairs.
+                            if slug in seen_db_paths.get(resolved_db_path, set()):
+                                logger.debug(
+                                    "kanban notifier: skipping duplicate board slug %s for DB %s",
+                                    slug, resolved_db_path,
+                                )
+                                continue
+                        seen_db_paths.setdefault(resolved_db_path, set()).add(slug)
                         try:
                             conn = _kb.connect(board=slug)
                         except Exception as exc:
@@ -1100,21 +1329,6 @@ class GatewayKanbanWatchersMixin:
                                     )
                             # Reset the failure counter on success.
                             sub_fail_counts.pop(sub_key, None)
-
-                            # After delivering the text notification, optionally
-                            # inject the event into the main agent session for
-                            # that board (per-event real-time awareness).
-                            # Fire-and-forget so the notifier loop is never
-                            # blocked.
-                            if self._kanban_notifier_inject_enabled(kanban_cfg):
-                                asyncio.ensure_future(
-                                    self._kanban_inject_event(
-                                        event=ev,
-                                        task=task,
-                                        board_slug=board_slug,
-                                        sub=sub,
-                                    )
-                                )
                         except Exception as exc:
                             fails = sub_fail_counts.get(sub_key, 0) + 1
                             sub_fail_counts[sub_key] = fails
@@ -1179,181 +1393,6 @@ class GatewayKanbanWatchersMixin:
                 if not self._running:
                     return
                 await asyncio.sleep(1)
-
-    def _kanban_notifier_inject_enabled(self, kanban_cfg: dict) -> bool:
-        return bool(kanban_cfg.get("notifier_inject", False))
-
-    async def _kanban_inject_event(
-        self,
-        *,
-        event,
-        task,
-        board_slug: str,
-        sub: dict,
-    ) -> None:
-        """Fire-and-forget: inject a kanban terminal event into a
-        dedicated **system session** (like cron jobs do).
-
-        The synthetic event is marked ``system_session=True`` so the
-        agent processes it and any output is delivered through the
-        kanban notifier's *own* delivery channel — never through the
-        user session's reply pipeline. The user does not receive the
-        agent's internal reasoning.
-
-        The board owner (the platform/chat that last operated on the
-        board) is looked up from the persistent ``kanban_board_owners``
-        table. Falls back to the in-memory cache for back-compat and to
-        the subscription's own (platform, chat_id) if neither has a
-        record — that way a freshly-subscribed user still gets the
-        event injected into their own session as a one-shot bootstrap.
-        """
-        try:
-            from hermes_cli import kanban_db as _kb
-            try:
-                from gateway.config import Platform as _Platform
-            except ImportError:
-                return
-
-            owner_source = self._kanban_lookup_board_owner(
-                board_slug, fallback_sub=sub, db_mod=_kb,
-            )
-            if not owner_source or not owner_source[0]:
-                logger.debug(
-                    "kanban notifier inject: no source for board %s, skipping",
-                    board_slug,
-                )
-                return
-            _plat_str, _chat_id = owner_source
-            try:
-                plat = _Platform(_plat_str)
-            except ValueError:
-                return
-            from gateway.session import SessionSource
-            from gateway.platforms.base import MessageEvent
-            source = SessionSource(
-                platform=plat,
-                chat_id=_chat_id,
-                chat_type="private",
-                user_id="system",
-                user_name="kanban-notifier",
-            )
-            kind = event.kind
-            task_id = sub["task_id"]
-            assignee = (
-                task.assignee
-                if task and getattr(task, "assignee", None)
-                else "unknown"
-            )
-            title = (
-                task.title if task and getattr(task, "title", None) else task_id
-            )[:120]
-            detail = ""
-            if kind == "completed":
-                payload_summary = (event.payload or {}).get("summary", "")
-                if payload_summary:
-                    detail = str(payload_summary).strip().splitlines()[0][:200]
-                elif task and getattr(task, "result", None):
-                    detail = str(task.result).strip().splitlines()[0][:200]
-            elif kind == "blocked":
-                detail = str((event.payload or {}).get("reason", ""))[:200]
-            elif kind == "gave_up":
-                detail = str((event.payload or {}).get("error", ""))[:200]
-            elif kind == "crashed":
-                detail = "worker crashed (pid gone); dispatcher will retry"
-            elif kind == "timed_out":
-                limit = (event.payload or {}).get("limit_seconds", 0)
-                detail = f"timed out (max_runtime={limit}s); will retry"
-            event_text = (
-                f"[KANBAN-EVENT] {kind} | task: {task_id} | "
-                f"board: {board_slug} | assignee: {assignee}\n\n"
-                f"## {kind.upper()} — {title}\n\n"
-                f"{detail}\n\n"
-                f"---\n"
-                f"metadata: task_id={task_id}, kind={kind}, "
-                f"board={board_slug}, assignee={assignee}"
-            )
-            # system_session=True routes this through the system-session
-            # pipeline: the agent runs, but the response is delivered
-            # via this mixin's own delivery channel rather than the
-            # user-facing reply pipeline. See MessageEvent.system_session.
-            synthetic_event = MessageEvent(
-                text=event_text,
-                source=source,
-                internal=True,
-                system_session=True,
-            )
-            await self._handle_message(synthetic_event)
-            logger.info(
-                "kanban notifier inject: delivered %s for %s to %s/%s",
-                kind, task_id, _plat_str, _chat_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "kanban notifier inject failed for %s: %s",
-                sub.get("task_id", "?"), exc,
-            )
-
-    def _kanban_lookup_board_owner(
-        self,
-        board_slug: str,
-        *,
-        fallback_sub: dict | None = None,
-        db_mod=None,
-    ) -> tuple[str, str] | None:
-        """Resolve which (platform, chat_id) should receive a kanban
-        notifier injection for *board_slug*.
-
-        Lookup order:
-          1. Persistent ``kanban_board_owners`` table — survives
-             restarts and works across multiple gateway processes.
-          2. The in-memory ``_kanban_last_user_source`` cache (set
-             during normal handle_message) — covers boards that have
-             never been written to the persistent table.
-          3. The subscription's own (platform, chat_id) as a last
-             resort — ensures a freshly-subscribed user still gets
-             events routed somewhere sensible on first delivery.
-
-        Returns ``None`` only when the board has no subscription AND
-        no recorded owner. ``db_mod`` is the ``hermes_cli.kanban_db``
-        module; defaults to a lazy import when not provided (kept as
-        a parameter so tests can stub it).
-        """
-        if db_mod is None:
-            try:
-                from hermes_cli import kanban_db as _db
-            except ImportError:
-                _db = None
-            db_mod = _db
-
-        # 1. Persistent owner table.
-        if db_mod is not None and hasattr(db_mod, "get_board_owner"):
-            try:
-                owner = db_mod.get_board_owner(
-                    db_mod.connect(board=board_slug), board=board_slug,
-                )
-                if owner and owner[0] and owner[1]:
-                    return owner
-            except Exception as exc:
-                logger.debug(
-                    "kanban board owner lookup on %s failed: %s",
-                    board_slug, exc,
-                )
-
-        # 2. In-memory cache (legacy path; covers board owners that
-        # haven't been flushed to the persistent table yet).
-        mem_cache = getattr(self, "_kanban_last_user_source", {}) or {}
-        cached = mem_cache.get(board_slug)
-        if cached and cached[0]:
-            return cached
-
-        # 3. Last-resort fallback: the subscription itself.
-        if fallback_sub:
-            plat = fallback_sub.get("platform")
-            chat = fallback_sub.get("chat_id")
-            if plat and chat:
-                return (plat, chat)
-
-        return None
 
     def _kanban_advance(
         self, sub: dict, cursor: int, board: Optional[str] = None,
