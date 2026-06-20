@@ -2569,6 +2569,124 @@ def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
 
 
 # ---------------------------------------------------------------------------
+# M6: 迭代过程透明 — iteration comment auto-write (DESIGN.md §5)
+# ---------------------------------------------------------------------------
+
+# Hard cap so a single iteration comment never blows past the 200-char
+# budget mandated by DESIGN.md §5 ("整体不超过 200 字符").
+_ITERATION_COMMENT_MAX = 200
+
+# System author for auto-written iteration comments. ``kanban show`` and the
+# gateway notifier render comments by this author as internal/loop system
+# noise (P2 — never pushed), so they stay transparent unless the user looks.
+_ITERATION_COMMENT_AUTHOR="***"
+
+# Human-readable labels for the ``outcome`` values that funnel through
+# ``_record_task_failure``. Used in the iteration-comment ``尝试`` field so a
+# user sees "crashed（崩溃）" rather than the raw enum.
+_OUTCOME_LABELS = {
+    "crashed": "worker 崩溃",
+    "timed_out": "超时",
+    "spawn_failed": "启动失败",
+    "gave_up": "放弃",
+}
+
+
+def _outcome_label(outcome: str) -> str:
+    """Map an internal outcome enum to a short Chinese label (M6)."""
+    return _OUTCOME_LABELS.get(outcome, outcome or "失败")
+
+
+def build_iteration_comment(
+    iteration_num: int,
+    attempt: str,
+    result: str,
+    next_step: str,
+) -> str:
+    """Format a single iteration comment line (DESIGN.md §5).
+
+    The canonical shape is::
+
+        🔄 迭代 #N | 尝试: <attempt> | 结果: <result> | 下一步: <next_step>
+
+    Constraints enforced:
+      * Prefix is always ``🔄 迭代 #N | `` (N = iteration_num, clamped ≥1).
+      * Exactly three ``|``-separated payload fields: 尝试 / 结果 / 下一步.
+      * Total length ≤ 200 chars — each field is truncated proportionally so
+        the prefix and structure always survive a long error string.
+
+    Pure function — no DB access — so it is trivially unit-testable.
+    """
+    n = max(1, int(iteration_num or 1))
+    prefix = f"🔄 迭代 #{n} | "
+
+    def _clean(s: str) -> str:
+        return ("" if s is None else str(s)).replace("\n", " ").replace("|", "/").strip()
+
+    a, r, s = _clean(attempt), _clean(result), _clean(next_step)
+
+    full = f"{prefix}尝试: {a} | 结果: {r} | 下一步: {s}"
+    if len(full) <= _ITERATION_COMMENT_MAX:
+        return full
+
+    # Over budget: shrink the three payload fields evenly, preserving the
+    # fixed labels ("尝试: ", " | 结果: ", " | 下一步: ") and prefix.
+    # suffix is everything after the payload fields start.
+    labels = "尝试: "  # first label; others are separators
+    overhead = len(prefix) + len("尝试: ") + len(" | 结果: ") + len(" | 下一步: ")
+    budget = _ITERATION_COMMENT_MAX - overhead
+    if budget < 6:
+        # Absurdly small — just hard-truncate the naive build.
+        return full[:_ITERATION_COMMENT_MAX]
+    # Distribute budget by current weight, floor 1 char each.
+    weights = [max(1, len(a)), max(1, len(r)), max(1, len(s))]
+    total_w = sum(weights)
+    alloc = [max(1, int(budget * w / total_w)) for w in weights]
+    # Fix rounding drift onto the largest field.
+    drift = budget - sum(alloc)
+    if drift:
+        idx = max(range(3), key=lambda i: weights[i])
+        alloc[idx] += drift
+    a2 = a[:alloc[0]]
+    r2 = r[:alloc[1]]
+    s2 = s[:alloc[2]]
+    return f"{prefix}尝试: {a2} | 结果: {r2} | 下一步: {s2}"
+
+
+def _write_iteration_comment(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    iteration_num: int,
+    attempt: str,
+    result: str,
+    next_step: str,
+) -> None:
+    """Write one iteration comment to *task_id*'s thread (M6, DESIGN.md §5).
+
+    Best-effort: a comment-write failure is logged but never raised, so the
+    dispatch loop cannot be derailed by a comment. Uses a direct INSERT (not
+    :func:`add_comment`) so no extra ``commented`` event is emitted and the
+    call is safe from inside or outside an open transaction.
+    """
+    body = build_iteration_comment(iteration_num, attempt, result, next_step)
+    try:
+        with write_txn(conn):
+            # Skip silently if the task vanished (archived/deleted mid-flight).
+            if not conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone():
+                return
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (task_id, _ITERATION_COMMENT_AUTHOR, body, int(time.time())),
+            )
+    except Exception as exc:  # pragma: no cover — defensive
+        _log.debug("M6: iteration comment write failed for %s: %s", task_id, exc)
+
+
+# ---------------------------------------------------------------------------
 # Attachments
 # ---------------------------------------------------------------------------
 
@@ -5172,6 +5290,37 @@ _RECENT_WORKER_EXITS_MAX = 4096
 _recent_worker_exits: "dict[int, tuple[int, float]]" = {}
 
 
+def _resolve_worker_exits() -> "dict[int, tuple[int, float]]":
+    """Return the canonical recent-worker-exits registry.
+
+    Module-level state on ``hermes_cli.kanban_db`` does not survive when
+    another test's ``del sys.modules[hermes_cli]`` cleanup creates a
+    fresh module instance on re-import. When that happens, two module
+    instances coexist: the canonical ``from hermes_cli import kanban_db
+    as kb`` reference (captured at test-module import time) holds the
+    old module, while a test-body ``import hermes_cli.kanban_db as _kb``
+    rebinds the name in ``sys.modules`` to a freshly created module with
+    its own (empty) ``_recent_worker_exits`` dict. Recording exits into
+    the new module's dict while classification reads from the old
+    module's dict causes the dispatcher to miss clean-exit /
+    rate-limited signals and fall through to the generic "unknown"
+    path  which is why a protocol-violation crash (clean exit on a
+    still-running task) fails to trip the circuit breaker.
+
+    Anchor the registry on whichever ``hermes_cli.kanban_db`` module
+    instance is currently in ``sys.modules`` so the recording and
+    classifying sides see the same dict regardless of which module
+    instance is calling them. Fall back to the calling module's own
+    dict for the rare case where ``sys.modules`` was cleared between
+    record and classify (canonical lookup miss).
+    """
+    import sys as _sys
+    canonical = _sys.modules.get("hermes_cli.kanban_db")
+    if canonical is not None and hasattr(canonical, "_recent_worker_exits"):
+        return canonical._recent_worker_exits
+    return _recent_worker_exits
+
+
 def _record_worker_exit(pid: int, raw_status: int) -> None:
     """Record a reaped child's exit status for later classification.
 
@@ -5181,18 +5330,19 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
     if not pid or pid <= 0:
         return
     now = time.time()
-    _recent_worker_exits[int(pid)] = (int(raw_status), now)
+    registry = _resolve_worker_exits()
+    registry[int(pid)] = (int(raw_status), now)
     # Age-based trim: drop entries older than the TTL.
-    if len(_recent_worker_exits) > _RECENT_WORKER_EXITS_MAX // 2:
+    if len(registry) > _RECENT_WORKER_EXITS_MAX // 2:
         cutoff = now - _RECENT_WORKER_EXIT_TTL_SECONDS
-        for _pid in [p for p, (_s, t) in _recent_worker_exits.items() if t < cutoff]:
-            _recent_worker_exits.pop(_pid, None)
+        for _pid in [p for p, (_s, t) in registry.items() if t < cutoff]:
+            registry.pop(_pid, None)
     # Size cap as a final guard.
-    if len(_recent_worker_exits) > _RECENT_WORKER_EXITS_MAX:
+    if len(registry) > _RECENT_WORKER_EXITS_MAX:
         # Drop oldest half.
-        ordered = sorted(_recent_worker_exits.items(), key=lambda kv: kv[1][1])
+        ordered = sorted(registry.items(), key=lambda kv: kv[1][1])
         for _pid, _ in ordered[: len(ordered) // 2]:
-            _recent_worker_exits.pop(_pid, None)
+            registry.pop(_pid, None)
 
 
 def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
@@ -5219,7 +5369,7 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     ``nonzero_exit``) or the signal number (for ``signaled``), or ``None``
     for ``unknown``.
     """
-    entry = _recent_worker_exits.get(int(pid))
+    entry = _resolve_worker_exits().get(int(pid))
     if entry is None:
         return ("unknown", None)
     raw, _ = entry
@@ -5754,6 +5904,33 @@ def _error_fingerprint(error_text: str) -> str:
     return fp.lower().strip()
 
 
+def _publish_side_channel(name: str, value) -> None:
+    """Stash a per-call side-channel value on ``detect_crashed_workers``.
+
+    ``detect_crashed_workers._last_rate_limited`` and the matching
+    ``_last_auto_blocked`` attribute are read by ``dispatch_once`` and by
+    tests that destructure them off whatever function object they hold a
+    reference to. Module-instance churn (see ``_resolve_worker_exits``
+    for the root cause) means the caller may be holding a different
+    module instance than the one currently in ``sys.modules``, so a
+    plain ``detect_crashed_workers.<name> = value`` only updates the
+    caller's instance  leaving the sys.modules-canonical function (and
+    anyone who imports ``hermes_cli.kanban_db as _kb`` fresh) reading
+    stale defaults.
+
+    Mirroring the write onto the sys.modules-canonical function keeps
+    every reader (production dispatcher, tests, follow-on calls within
+    the same fixture) in sync.
+    """
+    import sys as _sys
+    setattr(detect_crashed_workers, name, value)
+    canonical = _sys.modules.get("hermes_cli.kanban_db")
+    if canonical is not None and canonical is not globals().get("__name__"):
+        canonical_fn = getattr(canonical, "detect_crashed_workers", None)
+        if canonical_fn is not None and canonical_fn is not detect_crashed_workers:
+            setattr(canonical_fn, name, value)
+
+
 def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
@@ -5936,6 +6113,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer},
+                takeover=protocol_violation,
             )
             if tripped:
                 auto_blocked.append(tid)
@@ -5943,10 +6121,10 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # Keeps the public return type (``list[str]``) stable for direct callers
     # and tests that destructure the result; ``dispatch_once`` reads this
     # side-channel attribute to populate ``DispatchResult.auto_blocked``.
-    detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
+    _publish_side_channel("_last_auto_blocked", auto_blocked)
     # Same side-channel for rate-limited requeues — these did NOT count a
     # failure and are NOT crashes, so they stay out of the ``crashed`` return.
-    detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
+    _publish_side_channel("_last_rate_limited", rate_limited)
     return crashed
 
 
@@ -5960,6 +6138,7 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
+    takeover: bool = False,
 ) -> bool:
     """Record a non-success outcome (spawn_failed / crashed / timed_out)
     and maybe trip the circuit breaker.
@@ -6101,6 +6280,41 @@ def _record_task_failure(
                     run_id=run_id,
                 )
             # Timeout/crash path's caller already emitted its own event.
+    # ── M6: 迭代过程透明 (DESIGN.md §5) ──────────────────────────
+    # Write one iteration comment capturing what just happened, so a user
+    # running ``kanban show <id>`` can read the loop history without
+    # poking at the event log. Three shapes, by outcome:
+    #   * retry (not blocked)      → "失败 | 自动重试"
+    #   * gave_up (blocked)        → "放弃（已达上限） | 等待人工介入"
+    #   * takeover (protocol viol) → "coordinator 接管 | 等待人工完成"
+    # ``failures`` is the post-increment count == the iteration number.
+    try:
+        if takeover:
+            _write_iteration_comment(
+                conn, task_id,
+                iteration_num=failures,
+                attempt="协议违规 (rc=0 未调用 complete)",
+                result="coordinator 接管",
+                next_step="等待人工完成",
+            )
+        elif blocked:
+            _write_iteration_comment(
+                conn, task_id,
+                iteration_num=failures,
+                attempt=_outcome_label(outcome),
+                result="放弃（已达重试上限）",
+                next_step="等待人工介入",
+            )
+        else:
+            _write_iteration_comment(
+                conn, task_id,
+                iteration_num=failures,
+                attempt=_outcome_label(outcome),
+                result="失败",
+                next_step="自动重试",
+            )
+    except Exception as exc:  # pragma: no cover — defensive
+        _log.debug("M6: iteration comment hook failed for %s: %s", task_id, exc)
     return blocked
 
 
@@ -7678,12 +7892,20 @@ def unseen_events_for_sub(
         return 0, []
     cursor = int(row["last_event_id"])
     kind_list = list(kinds) if kinds else None
-    q = (
-        "SELECT * FROM task_events WHERE task_id = ? AND id > ? "
-        + ("AND kind IN (" + ",".join("?" * len(kind_list)) + ") " if kind_list else "")
-        + "ORDER BY id ASC"
-    )
-    params: list[Any] = [task_id, cursor]
+    if task_id == "_board_":
+        q = (
+            "SELECT * FROM task_events WHERE id > ? "
+            + ("AND kind IN (" + ",".join("?" * len(kind_list)) + ") " if kind_list else "")
+            + "ORDER BY id ASC"
+        )
+        params: list[Any] = [cursor]
+    else:
+        q = (
+            "SELECT * FROM task_events WHERE task_id = ? AND id > ? "
+            + ("AND kind IN (" + ",".join("?" * len(kind_list)) + ") " if kind_list else "")
+            + "ORDER BY id ASC"
+        )
+        params: list[Any] = [task_id, cursor]
     if kind_list:
         params.extend(kind_list)
     rows = conn.execute(q, params).fetchall()

@@ -395,13 +395,38 @@ def notify_parents_on_verification_failure(
       via ``_would_create_cycle``, so notification never loops.
     """
     parent_list = kb_module.parent_ids(conn, task_id)
-    if not parent_list:
-        return 0
 
     child_task = kb_module.get_task(conn, task_id)
     child_title = child_task.title if child_task else task_id
 
     failure_summary = _build_failure_summary(failures)
+
+    # ── M6: 迭代过程透明 (DESIGN.md §5) ──────────────────────────
+    # Write an iteration comment on the *child* task whose verification
+    # failed, so ``kanban show <child>`` surfaces the loop history. This
+    # is independent of the parent-notification below — it fires even
+    # when the task has no parents (standalone task loop).
+    iteration_num = loop_depth + 1
+    try:
+        kb_module._write_iteration_comment(
+            conn, task_id,
+            iteration_num=iteration_num,
+            attempt="数据未通过校验",
+            result="验证失败",
+            next_step="重新修复",
+        )
+        logger.info(
+            "M6: wrote verification-failure iteration comment on %s (iter #%d)",
+            task_id, iteration_num,
+        )
+    except Exception as exc:
+        logger.warning(
+            "M6: failed to write verification iteration comment on %s: %s",
+            task_id, exc,
+        )
+
+    if not parent_list:
+        return 0
     notified = 0
 
     for parent_id in parent_list:
@@ -1451,6 +1476,51 @@ def classify_event_severity(event: Any) -> str:
     return "P2"
 
 
+def _event_to_filter_dict(
+    event: Any,
+    task: Any,
+    board: str,
+) -> dict:
+    """Build the classifier-ready dict from a raw event + task.
+
+    The :func:`classify_event_severity` classifier expects a plain dict
+    with ``kind``, ``task_id`` and optional ``reason``.  This helper
+    normalises a ``kanban_db.Event`` / ``kanban_db.Task`` pair into that
+    shape so tests and the notifier loop agree on the interface without
+    every caller having to redo the field extraction.
+
+    Returns a flat dict.  Never raises — missing fields produce empty
+    defaults instead of ``None``, which the classifier already handles
+    as ``P2``.
+    """
+    if not isinstance(event, dict):
+        try:
+            event_dict: dict = {
+                "kind": str(getattr(event, "kind", "") or ""),
+                "task_id": str(getattr(event, "task_id", "") or ""),
+                "payload": getattr(event, "payload", None) or {},
+            }
+        except Exception:
+            return {"kind": "", "task_id": "", "_board": board}
+    else:
+        event_dict = dict(event)
+    if "reason" not in event_dict:
+        pl = event_dict.get("payload") or {}
+        if isinstance(pl, dict) and pl.get("reason"):
+            event_dict["reason"] = str(pl["reason"])
+    event_dict.setdefault("kind", "")
+    event_dict.setdefault("task_id", "")
+    event_dict["_board"] = board
+    # Best-effort prior-failure count from the task object.
+    if task is not None:
+        try:
+            prior = getattr(task, "consecutive_run_failures", 0) or 0
+            event_dict["_prior_failure_count"] = int(prior)
+        except Exception:
+            pass
+    return event_dict
+
+
 def _filter_event_for_push(
     event: Any,
     floor: Optional[str] = None,
@@ -2368,6 +2438,77 @@ class GatewayKanbanWatchersMixin:
             # Reset stale counter — something real happened.
             self.task_loop_engine._stale_counts[slug] = 0
 
+    # ---------------------------------------------------------------------
+    # M2: P1 event aggregation (notification aggregator)
+    # ---------------------------------------------------------------------
+
+    @property
+    def notification_aggregator(self) -> Optional[object]:
+        """Lazy-initialised P1 aggregation buffer (M2)."""
+        if not hasattr(self, "_notification_aggregator"):
+            self._notification_aggregator = None
+        return self._notification_aggregator
+
+    def _lazy_init_aggregator(self, kanban_cfg: dict) -> None:
+        """Create the aggregator from config if not already initialised.
+
+        Safe to call on every tick — the `_notification_aggregator` is
+        set exactly once.  A disabled or missing config produces ``None``
+        (the notifier loop skips aggregation silently).
+        """
+        if hasattr(self, "_notification_aggregator") and self._notification_aggregator is not None:
+            return
+        try:
+            from gateway.notification_aggregator import (
+                NotificationAggregator as _Agg,
+            )
+            self._notification_aggregator = _Agg.from_config(
+                kanban_cfg or {},
+            )
+            logger.info(
+                "kanban notifier: aggregation %s (tw=%s ct=%s mba=%s)",
+                "enabled" if self._notification_aggregator.enabled else "disabled",
+                self._notification_aggregator.time_window_seconds,
+                self._notification_aggregator.count_threshold,
+                self._notification_aggregator.max_buffer_age,
+            )
+        except Exception as exc:
+            logger.debug("kanban notifier: aggregator init failed: %s", exc)
+            self._notification_aggregator = None
+
+    async def _deliver_aggregated_buffer(
+        self,
+        buf: object,
+        board: str,
+        adapter,
+        chat_id: str,
+        metadata: dict,
+    ) -> None:
+        """Deliver one aggregated buffer as a summary message.
+
+        Falls back to :func:`format_summary` when the DB-aware
+        :func:`format_pipeline_summary` is unavailable.  Never raises
+        — the caller is responsible for logging delivery failures.
+        """
+        if buf is None:
+            return
+        msg = ""
+        try:
+            from hermes_cli import kanban_db as _kb
+            conn = _kb.connect(board=board)
+            try:
+                from gateway.notification_aggregator import (
+                    format_pipeline_summary as _fmt,
+                )
+                msg = _fmt(buf, conn=conn)
+            finally:
+                conn.close()
+        except Exception:
+            from gateway.notification_aggregator import format_summary as _fmt
+            msg = _fmt(buf)
+        if msg:
+            await adapter.send(chat_id, msg, metadata=metadata)
+
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
 
@@ -2406,6 +2547,8 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban notifier: cannot load config (%s); disabled", exc)
             return
         kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        # ── M2: initialise notification aggregator ────────────────────────
+        self._lazy_init_aggregator(kanban_cfg)
         if not kanban_cfg.get("dispatch_in_gateway", True):
             logger.info(
                 "kanban notifier: disabled via config kanban.dispatch_in_gateway=false"
@@ -2623,11 +2766,6 @@ class GatewayKanbanWatchersMixin:
                                 msg = m5_report
                             else:
                                 # Fall through to the normal completed message.
-                                # Prefer the run's summary (the worker's
-                                # intentional human-facing handoff, carried
-                                # in the event payload), then fall back to
-                                # task.result for legacy rows written before
-                                # runs shipped.
                                 handoff = ""
                                 payload_summary = None
                                 if ev.payload and ev.payload.get("summary"):
@@ -2644,6 +2782,34 @@ class GatewayKanbanWatchersMixin:
                                     f"✔ {tag}Kanban {sub['task_id']} done"
                                     f" — {title}{handoff}"
                                 )
+                            # ── M2: pipeline-done aggregated flush ──────────
+                            # Before delivering the per-event "completed"
+                            # message, flush any buffered P1 events for this
+                            # pipeline. The aggregated summary is delivered
+                            # before the per-event text so the user sees the
+                            # full picture first.
+                            if self.notification_aggregator is not None:
+                                try:
+                                    flush_buf = await asyncio.to_thread(
+                                        self.notification_aggregator.flush_if_pipeline_root,
+                                        board=board_slug,
+                                        task_id=sub["task_id"],
+                                        sub=sub,
+                                    )
+                                    if flush_buf is not None:
+                                        meta = {}
+                                        if sub.get("thread_id"):
+                                            meta["thread_id"] = sub["thread_id"]
+                                        await self._deliver_aggregated_buffer(
+                                            flush_buf, board_slug,
+                                            adapter, sub["chat_id"], meta,
+                                        )
+                                except Exception as _m2d_exc:
+                                    logger.debug(
+                                        "kanban notifier: pipeline-done flush "
+                                        "failed for %s: %s",
+                                        sub["task_id"], _m2d_exc,
+                                    )
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
@@ -2867,6 +3033,48 @@ class GatewayKanbanWatchersMixin:
                     asyncio.ensure_future(
                         self._kanban_orchestrator_callback(deliveries, kanban_cfg)
                     )
+
+                # ── M2: flush due aggregated buffers ──────────────────────
+                # Each tick, check the time window and max-age triggers.
+                # One tick per board so the DB conn has a clear scope.
+                if self.notification_aggregator is not None:
+                    try:
+                        due = await asyncio.to_thread(
+                            self.notification_aggregator.take_due_buffers,
+                        )
+                        if due:
+                            logger.debug(
+                                "kanban notifier: flushing %d aggregated buffer(s)",
+                                len(due),
+                            )
+                        for buf in due:
+                            sub_key = getattr(buf, "subscription_key", None)
+                            if not isinstance(sub_key, tuple) or len(sub_key) < 2:
+                                continue
+                            plat_str, chat_id = sub_key[0], sub_key[1]
+                            thread_id = sub_key[2] if len(sub_key) > 2 else ""
+                            for board_slug in {getattr(b, "board", "") for b in due}:
+                                if not board_slug:
+                                    continue
+                                plat_name = plat_str.lower()
+                                try:
+                                    plat = _Platform(plat_name)
+                                except ValueError:
+                                    continue
+                                adapter = self.adapters.get(plat)
+                                if adapter is None:
+                                    continue
+                                meta = {}
+                                if thread_id:
+                                    meta["thread_id"] = thread_id
+                                await self._deliver_aggregated_buffer(
+                                    buf, board_slug, adapter, chat_id, meta,
+                                )
+                    except Exception as m2_exc:
+                        logger.debug(
+                            "kanban notifier: aggregation flush failed: %s",
+                            m2_exc,
+                        )
 
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)

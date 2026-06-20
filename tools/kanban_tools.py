@@ -31,12 +31,108 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from typing import Any, Optional
 
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 
 logger = logging.getLogger(__name__)
+
+
+class _BoardSourceRegistry:
+    """Thread-safe per-board ``(platform, chat_id)`` source registry.
+
+    Replaces the bare module-level ``dict`` that was the source of
+    Bug #1 (concurrent-write leakage): two dispatcher sessions writing
+    the same board slug could interleave and leave the dict in a torn
+    state. Every access is now guarded by a lock so concurrent
+    ``_connect()`` writes from parallel workers never corrupt each other.
+
+    The registry maps board slug → last ``(platform_str, chat_id)`` that
+    operated the board. Last-write-wins per slug is the *intended*
+    semantic: the most recent active session is the one the epoch
+    callback should route notifications to. Different slugs never
+    collide, so two workers on two boards are fully isolated.
+    """
+
+    def __init__(self) -> None:
+        self._sources: dict[str, tuple[str, str]] = {}
+        self._lock = threading.Lock()
+
+    def set(self, board: str, platform: str, chat_id: str) -> None:
+        with self._lock:
+            self._sources[board] = (platform, chat_id)
+
+    def get(self, board: str) -> Optional[tuple[str, str]]:
+        with self._lock:
+            return self._sources.get(board)
+
+    def clear(self, board: Optional[str] = None) -> None:
+        with self._lock:
+            if board is None:
+                self._sources.clear()
+            else:
+                self._sources.pop(board, None)
+
+    def snapshot(self) -> dict[str, tuple[str, str]]:
+        """Return a shallow copy (safe to iterate outside the lock)."""
+        with self._lock:
+            return dict(self._sources)
+
+
+# Module-level singleton. Written by kanban tool handlers via _connect()
+# (reading the per-session ContextVar), read by the gateway epoch callback
+# via resolve_board_source() to route notifications.
+_board_source_registry = _BoardSourceRegistry()
+# Backward-compat alias for any out-of-tree code that still reads the old
+# bare-dict name. It is NOT a dict — access goes through the registry's
+# thread-safe methods. The epoch callback and _connect() use the registry
+# directly; this alias only exists so a stray ``_kt._kanban_board_sources``
+# reference doesn't AttributeError at import time.
+_kanban_board_sources = _board_source_registry
+
+
+def resolve_board_source(slug: str) -> Optional[tuple[str, str]]:
+    """Unified source resolution for epoch-notification routing.
+
+    Returns ``(platform_str, chat_id)`` for *slug*, or ``None`` when no
+    source can be determined.  Lookup order:
+
+    1. **In-memory last-interaction source** — set by :func:`_connect`
+       when a kanban *write* tool (create/complete/block) is invoked.
+       This records which session last operated the board.
+    2. **Board notify subscription** — falls back to the first row in
+       ``kanban_notify_subs`` for the board, so boards that were set up
+       via ``/kanban create`` but never had a tool write still route
+       correctly.
+
+    This replaces the dual-path inline lookup that previously lived in
+    the epoch callback (Bug #3) and the ``_kanban_last_user_source``
+    alias in run.py (Bug #4).
+    """
+    # Primary: in-memory last-interaction source (thread-safe registry).
+    src = _board_source_registry.get(slug)
+    if src and src[0]:
+        return src
+
+    # Fallback: board's active notify subscription.
+    try:
+        from hermes_cli import kanban_db as kb
+        conn = kb.connect(board=slug)
+        try:
+            subs = kb.list_notify_subs(conn)
+            if subs:
+                s = subs[0]
+                sp = (s.get("platform") or "").lower()
+                sch = s.get("chat_id") or ""
+                if sp and sch:
+                    return (sp, sch)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +258,7 @@ def _enforce_worker_task_ownership(tid: str) -> Optional[str]:
     return None
 
 
-def _connect(board: Optional[str] = None):
+def _connect(board: Optional[str] = None, *, update_source: bool = False):
     """Import + connect lazily so the module imports cleanly in non-kanban
     contexts (e.g. test rigs that import every tool module).
 
@@ -172,9 +268,36 @@ def _connect(board: Optional[str] = None):
     (``HERMES_KANBAN_DB`` → ``HERMES_KANBAN_BOARD`` env → current symlink
     → ``default``). Per-tool ``board`` lets a Telegram-side agent override
     the env-pinned active board without restarting Hermes.
+
+    ``update_source=True`` records this (platform, chat_id) as the board's
+    epoch push target. Only set this for write operations (create, complete,
+    block, etc.) — read-only ops (list, show) must NOT hijack the channel.
     """
     from hermes_cli import kanban_db as kb
-    return kb, kb.connect(board=board)
+    conn = kb.connect(board=board)
+    if update_source:
+        try:
+            resolved = kb.get_current_board() if not board else board
+            # Prefer ContextVar (per-session, concurrent-safe) over the
+            # process-wide registry. The registry write below is thread-safe
+            # (Bug #1 fix); the ContextVar isolates which session's source
+            # is recorded so two concurrent workers on different boards never
+            # cross-contaminate.
+            _current_src = None
+            try:
+                from gateway.session_context import _KANBAN_SOURCE_PLATFORM, _KANBAN_SOURCE_CHAT
+                _p = _KANBAN_SOURCE_PLATFORM.get()
+                _c = _KANBAN_SOURCE_CHAT.get()
+                if _p and _c:
+                    _current_src = (_p, _c)
+            except Exception:
+                pass
+            if _current_src and resolved:
+                _plat, _chat = _current_src
+                _board_source_registry.set(resolved, _plat, _chat)
+        except Exception:
+            pass
+    return kb, conn
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +675,7 @@ def _handle_complete(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             try:
                 ok = kb.complete_task(
@@ -611,7 +734,7 @@ def _handle_block(args: dict, **kw) -> str:
         return tool_error("reason is required — explain what input you need")
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             ok = kb.block_task(
                 conn, tid,
@@ -708,7 +831,7 @@ def _handle_comment(args: dict, **kw) -> str:
     author = os.environ.get("HERMES_PROFILE") or "worker"
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             cid = kb.add_comment(conn, tid, author=author, body=str(body))
             return _ok(task_id=tid, comment_id=cid)
@@ -782,7 +905,7 @@ def _handle_create(args: dict, **kw) -> str:
         )
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             # Inherit the spawning worker's own task workspace when the
             # caller didn't specify one (see resolution note above).
@@ -943,7 +1066,7 @@ def _handle_unblock(args: dict, **kw) -> str:
         return ownership_err
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             ok = kb.unblock_task(conn, str(tid))
             if not ok:
@@ -966,7 +1089,7 @@ def _handle_link(args: dict, **kw) -> str:
         return tool_error("both parent_id and child_id are required")
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
+        kb, conn = _connect(board=board, update_source=True)
         try:
             kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
             return _ok(parent_id=parent_id, child_id=child_id)

@@ -340,18 +340,31 @@ class GatewaySlashCommandsMixin:
             break
 
         is_create = action == "create"
+        # All mutation commands that touch a specific task — auto-sub
+        # the user's current platform+chat so they hear about future
+        # terminal events regardless of where they first created the card.
+        _MUTATION_ACTIONS = frozenset({
+            "create", "unblock", "complete", "block", "assign",
+            "reclaim", "promote", "edit", "comment", "claim",
+            "schedule", "link", "unlink",
+        })
+        is_mutation = action in _MUTATION_ACTIONS
 
         try:
             output = await asyncio.to_thread(run_slash, text)
         except Exception as exc:  # pragma: no cover - defensive
             return t("gateway.kanban.error_prefix", error=exc)
 
-        # Auto-subscribe on create. Parse the task id from the CLI's standard
-        # success line ("Created t_abcd  (ready, assignee=...)"). If the user
-        # passed --json we don't subscribe; they're clearly scripting and
-        # can call /kanban notify-subscribe explicitly.
-        if is_create and output:
-            m = re.search(r"Created\s+(t_[0-9a-f]+)\b", output)
+        # Auto-subscribe on mutations involving a task.  Parse the task id
+        # from the CLI's standard success line.  For create the pattern is
+        # "Created t_abcd …"; for other mutations the task_id is embedded
+        # in the first token of the output (e.g. "t_abcd  …").
+        if is_mutation and output:
+            # Create uses a distinct prefix.
+            if is_create:
+                m = re.search(r"Created\s+(t_[0-9a-f]+)\b", output)
+            else:
+                m = re.search(r"\b(t_[0-9a-f]+)\b", output)
             if m:
                 task_id = m.group(1)
                 try:
@@ -375,6 +388,15 @@ class GatewaySlashCommandsMixin:
                                     user_id=user_id,
                                     notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
                                 )
+                                # Stamp the task with the originating platform
+                                # so the notifier routes the entire lifecycle
+                                # (including worker-driven events) to this
+                                # platform only.
+                                conn.execute(
+                                    "UPDATE tasks SET last_mutated_platform = ? "
+                                    "WHERE id = ?",
+                                    (platform_str, task_id),
+                                )
                             finally:
                                 conn.close()
                         await asyncio.to_thread(_sub)
@@ -384,7 +406,7 @@ class GatewaySlashCommandsMixin:
                             + t("gateway.kanban.subscribed_suffix", task_id=task_id)
                         )
                 except Exception as exc:
-                    logger.warning("kanban create auto-subscribe failed: %s", exc)
+                    logger.warning("kanban mutation auto-subscribe failed: %s", exc)
 
         # Gateway messages have practical length caps; truncate long
         # listings to keep the UX reasonable.
