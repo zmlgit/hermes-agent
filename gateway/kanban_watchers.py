@@ -2700,21 +2700,20 @@ class GatewayKanbanWatchersMixin:
                                         thread_id=sub.get("thread_id") or None,
                                     )
                                     continue
-                                # Platform-scoped routing: if the task has a
-                                # last_mutated_platform, only deliver to
-                                # subscriptions matching that platform.
-                                # NULL (legacy or CLI-created) = broadcast.
+                                # Platform info is logged for debugging but does
+                                # NOT filter delivery — all subscribers receive
+                                # events regardless of last_mutated_platform.
+                                # The subscriber set is the correct routing
+                                # mechanism: whoever subscribed gets notified.
                                 task_platform = (
                                     getattr(task, "last_mutated_platform", None)
                                     if task else None
                                 )
-                                if task_platform and platform != task_platform.lower():
+                                if task_platform:
                                     logger.debug(
-                                        "kanban notifier: skipping %s on %s for %s; task.platform=%s",
-                                        sub["task_id"], platform, slug,
-                                        task_platform,
+                                        "kanban notifier: delivering %s on %s for %s; task.platform=%s",
+                                        sub["task_id"], platform, slug, task_platform,
                                     )
-                                    continue
                                 logger.debug(
                                     "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                                     len(events), sub["task_id"], slug, old_cursor, cursor,
