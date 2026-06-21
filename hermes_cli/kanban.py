@@ -302,6 +302,48 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     b_set_wd.add_argument("path", nargs="?", default=None,
                           help="Absolute path to use as default workdir. Omit to clear.")
 
+    b_owner = boards_sub.add_parser(
+        "owner",
+        help="Manage delivery channels (owners) for a board — where task-loop "
+             "notifications and orchestrator wake-ups get sent",
+        description=(
+            "A board owner is a (platform, chat_id) delivery target. The "
+            "task-loop engine fans out orchestrator wake-ups and convergence "
+            "summaries to EVERY registered owner, so a board watched from "
+            "both Feishu and WeChat delivers to both. Register an owner for "
+            "a board created via CLI/API so the loop can fire without a "
+            "prior messaging interaction."
+        ),
+    )
+    owner_sub = b_owner.add_subparsers(dest="owner_action")
+    o_add = owner_sub.add_parser("add", help="Register a delivery channel for a board")
+    o_add.add_argument("slug")
+    o_add.add_argument("platform", nargs="?", default=None,
+                       help="Platform name (feishu, weixin, telegram, ...). "
+                            "Omit + --auto to detect from recent gateway sessions.")
+    o_add.add_argument("chat_id", nargs="?", default=None,
+                       help="Chat/channel id on that platform. Omit + --auto to detect.")
+    o_add.add_argument("--user-id", default=None, help="Optional user id")
+    o_add.add_argument("--auto", action="store_true",
+                       help="Auto-detect (platform, chat_id) from the gateway's recent "
+                            "DM channels and register all of them. "
+                            "Without --all, picks the single most recent DM.")
+    o_add.add_argument("--all", action="store_true",
+                       help="With --auto, register EVERY detected DM channel (multi-channel fan-out). "
+                            "Without --all, only the most recent DM is registered.")
+
+    o_rm = owner_sub.add_parser("rm", aliases=["remove"],
+                                help="Remove a delivery channel from a board")
+    o_rm.add_argument("slug")
+    o_rm.add_argument("platform")
+    o_rm.add_argument("chat_id")
+
+    o_list = owner_sub.add_parser("list", aliases=["ls"],
+                                  help="List delivery channels for a board")
+    o_list.add_argument("slug")
+
+    owner_sub.add_parser("show", help="List owners for the current board")
+
     # --- create ---
     p_create = sub.add_parser("create", help="Create a new task")
     p_create.add_argument("title", help="Task title")
@@ -1016,6 +1058,8 @@ def _dispatch_boards(args: argparse.Namespace) -> int:
         return _cmd_boards_rename(args)
     if sub == "set-default-workdir":
         return _cmd_boards_set_default_workdir(args)
+    if sub == "owner":
+        return _dispatch_boards_owner(args)
     print(f"kanban boards: unknown action {sub!r}", file=sys.stderr)
     return 2
 
@@ -1188,6 +1232,181 @@ def _cmd_boards_set_default_workdir(args: argparse.Namespace) -> int:
         print(f"Board {normed!r} default workdir set to {new_val!r}.")
     else:
         print(f"Board {normed!r} default workdir cleared.")
+    return 0
+
+
+def _dispatch_boards_owner(args: argparse.Namespace) -> int:
+    """Handle ``hermes kanban boards owner <action>``."""
+    sub = getattr(args, "owner_action", None) or "show"
+    if sub in {"add", "new"}:
+        return _cmd_boards_owner_add(args)
+    if sub in {"rm", "remove"}:
+        return _cmd_boards_owner_rm(args)
+    if sub in {"list", "ls", "show"}:
+        return _cmd_boards_owner_list(args)
+    print(f"kanban boards owner: unknown action {sub!r}", file=sys.stderr)
+    return 2
+
+
+def _detect_delivery_channels() -> list[tuple[str, str]]:
+    """Auto-detect (platform, chat_id) DM channels from gateway state.
+
+    Scans ``channel_directory.json`` (written by the gateway on every
+    inbound message) for DM/private channels and returns them deduped,
+    most-recently-seen platform first. Falls back to the ``default``
+    board's registered owners if the directory is empty. Returns ``[]``
+    when no channel can be detected.
+    """
+    from hermes_constants import get_hermes_home
+    candidates: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    dir_path = get_hermes_home() / "channel_directory.json"
+    if dir_path.exists():
+        try:
+            data = json.loads(dir_path.read_text())
+            for plat, chans in (data.get("platforms") or {}).items():
+                plat = (plat or "").lower().strip()
+                if not plat:
+                    continue
+                for ch in chans or []:
+                    if not isinstance(ch, dict):
+                        continue
+                    ctype = (ch.get("type") or "").lower()
+                    if ctype in ("system", "bot", ""):
+                        continue
+                    cid = (ch.get("id") or "").strip()
+                    if ":" in cid and ctype in ("dm", "private"):
+                        cid = cid.split(":", 1)[0]
+                    if not cid:
+                        continue
+                    if " " in cid or "(" in cid or "Platform" in cid:
+                        continue
+                    key = (plat, cid)
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append(key)
+        except Exception:
+            pass
+
+    if not candidates:
+        try:
+            with kb.connect_closing(board=kb.DEFAULT_BOARD) as conn:
+                owners = kb.get_board_owners(conn, kb.DEFAULT_BOARD)
+            for plat, chat in owners:
+                key = ((plat or "").lower(), chat)
+                if key not in seen and key[0] and key[1]:
+                    seen.add(key)
+                    candidates.append(key)
+        except Exception:
+            pass
+
+    return candidates
+
+
+def _cmd_boards_owner_add(args: argparse.Namespace) -> int:
+    try:
+        normed = kb._normalize_board_slug(args.slug)
+    except ValueError as exc:
+        print(f"kanban boards owner add: {exc}", file=sys.stderr)
+        return 2
+    if not normed or not kb.board_exists(normed):
+        print(f"kanban boards owner add: board {args.slug!r} does not exist",
+              file=sys.stderr)
+        return 1
+
+    plat = (args.platform or "").lower().strip()
+    chat = (args.chat_id or "").strip()
+    auto = bool(getattr(args, "auto", False))
+    want_all = bool(getattr(args, "all", False))
+
+    if (not plat or not chat) and not auto:
+        print(
+            "kanban boards owner add: platform and chat_id are required, "
+            "or pass --auto to detect from recent gateway sessions.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if auto and (not plat or not chat):
+        detected = _detect_delivery_channels()
+        if not detected:
+            print(
+                "kanban boards owner add --auto: no DM channels detected. "
+                "Send a message to the gateway from your chat app first, "
+                "then retry — or specify platform and chat_id explicitly.",
+                file=sys.stderr,
+            )
+            return 1
+        targets = detected if want_all else detected[:1]
+        if not want_all and len(detected) > 1:
+            print(f"Detected {len(detected)} DM channels; registering the most recent one.")
+            print("Pass --auto --all to register every channel (multi-channel fan-out).")
+            print("Detected: " + ", ".join(f"{p}/{c}" for p, c in detected))
+            print()
+        registered = 0
+        for tplat, tchat in targets:
+            with kb.connect_closing(board=normed) as conn:
+                kb.set_board_owner(conn, normed, tplat, tchat,
+                                   user_id=getattr(args, "user_id", None))
+            print(f"Owner registered for board {normed!r}: {tplat}/{tchat}")
+            registered += 1
+        if registered:
+            print(f"Task-loop notifications and orchestrator wake-ups will fan out to {registered} channel(s).")
+        return 0
+
+    if not plat or not chat:
+        print("kanban boards owner add: platform and chat_id are required",
+              file=sys.stderr)
+        return 2
+    with kb.connect_closing(board=normed) as conn:
+        kb.set_board_owner(conn, normed, plat, chat, user_id=getattr(args, "user_id", None))
+    print(f"Owner registered for board {normed!r}: {plat}/{chat}")
+    print("Task-loop notifications and orchestrator wake-ups will fan out to this channel.")
+    return 0
+
+
+def _cmd_boards_owner_rm(args: argparse.Namespace) -> int:
+    try:
+        normed = kb._normalize_board_slug(args.slug)
+    except ValueError as exc:
+        print(f"kanban boards owner rm: {exc}", file=sys.stderr)
+        return 2
+    if not normed or not kb.board_exists(normed):
+        print(f"kanban boards owner rm: board {args.slug!r} does not exist",
+              file=sys.stderr)
+        return 1
+    plat = (args.platform or "").lower().strip()
+    chat = (args.chat_id or "").strip()
+    with kb.connect_closing(board=normed) as conn:
+        removed = kb.remove_board_owner(conn, normed, plat, chat)
+    if removed:
+        print(f"Removed owner {plat}/{chat} from board {normed!r}.")
+    else:
+        print(f"No matching owner {plat}/{chat} on board {normed!r}.")
+        return 1
+    return 0
+
+
+def _cmd_boards_owner_list(args: argparse.Namespace) -> int:
+    slug = getattr(args, "slug", None)
+    if not slug:
+        slug = kb.get_current_board()
+    try:
+        normed = kb._normalize_board_slug(slug)
+    except ValueError as exc:
+        print(f"kanban boards owner list: {exc}", file=sys.stderr)
+        return 2
+    with kb.connect_closing(board=normed) as conn:
+        owners = kb.get_board_owners(conn, normed)
+    if not owners:
+        print(f"Board {normed!r} has no owners.")
+        print("Register one with `hermes kanban boards owner add <slug> <platform> <chat_id>`.")
+        print("Without an owner, task-loop notifications and orchestrator wake-ups are not delivered.")
+        return 0
+    print(f"Owners for board {normed!r}:")
+    for plat, chat in owners:
+        print(f"  {plat:10s}  {chat}")
     return 0
 
 

@@ -3031,6 +3031,27 @@ def set_board_owner(
     )
 
 
+def remove_board_owner(
+    conn: sqlite3.Connection,
+    board: str,
+    platform: str,
+    chat_id: str,
+) -> int:
+    """Delete a ``(platform, chat_id)`` owner row for *board*.
+
+    Returns the number of rows deleted (0 if the owner was not registered).
+    Run inside a :func:`write_txn`. Silently coerces platform to lowercase
+    and strips whitespace, matching :func:`set_board_owner`.
+    """
+    with write_txn(conn):
+        cur = conn.execute(
+            "DELETE FROM kanban_board_owners "
+            "WHERE board = ? AND platform = ? AND chat_id = ?",
+            (board, (platform or "").lower().strip(), (chat_id or "").strip()),
+        )
+        return cur.rowcount
+
+
 def _end_run(
     conn: sqlite3.Connection,
     task_id: str,

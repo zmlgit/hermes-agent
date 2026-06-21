@@ -27,6 +27,18 @@ logger = logging.getLogger("gateway.run")
 
 
 
+_ACTION_BY_KIND = {
+    "completed": "check_children_promoted",
+    "crashed": "confirm_auto_retry_or_diagnose",
+    "gave_up": "resolve_blocker_or_supersede",
+    "blocked": "read_reason_then_unblock_or_reassign",
+    "timed_out": "confirm_auto_retry_or_raise_budget",
+    "verification_failed": "spawn_remediation_then_block",
+    "spawn_failed": "diagnose_env_then_prep_task",
+    "reclaimed": "verify_progress_not_silent_loss",
+}
+
+
 # ---------------------------------------------------------------------------
 # M2-1: Smart gave_up detection — pure functions
 # ---------------------------------------------------------------------------
@@ -270,8 +282,6 @@ def compute_board_convergence(
     blocked_ratio = blocked / total if total > 0 else 0.0
     resolve_rate = resolved / total if total > 0 else 0.0
 
-    # P0 fix: bound vf/remediation counts to a recent window so stale
-    # historical events don't permanently block convergence.
     cutoff = time.time() - time_window_seconds
 
     vf_row = conn.execute(
@@ -288,7 +298,14 @@ def compute_board_convergence(
     ).fetchone()
     new_tasks_created = int(rt_row["n"]) if rt_row else 0
 
+    non_done = total - resolved
     converged = (
+        total > 0
+        and non_done == 0
+        and new_tasks_created == 0
+        and verification_failed == 0
+    )
+    converged_ratio = (
         total > 0
         and new_tasks_created == 0
         and blocked_ratio < blocked_ratio_threshold
@@ -307,6 +324,8 @@ def compute_board_convergence(
         "new_tasks_created": new_tasks_created,
         "verification_failed": verification_failed,
         "converged": converged,
+        "converged_ratio": converged_ratio,
+        "non_done": non_done,
         "time_window_seconds": time_window_seconds,
     }
 
@@ -1931,26 +1950,49 @@ class GatewayKanbanWatchersMixin:
                 for r in recent_rows:
                     _eid, _tid, _kind, _payload = r
                     _tinfo = conn.execute(
-                        "SELECT title, assignee, result FROM tasks WHERE id=?",
+                        "SELECT title, assignee, result, consecutive_failures, "
+                        "last_failure_error, max_retries FROM tasks WHERE id=?",
                         (_tid,),
                     ).fetchone()
                     _title = _tinfo[0] if _tinfo else "?"
                     _assignee = _tinfo[1] if _tinfo else "?"
                     _summary = ""
+                    _payload_obj: dict = {}
                     if _payload:
                         try:
-                            _p = json.loads(_payload)
-                            _summary = _p.get("summary", "") or ""
+                            _payload_obj = json.loads(_payload)
+                            _summary = _payload_obj.get("summary", "") or ""
                         except Exception:
                             _summary = ""
                     if not _summary and _tinfo and _tinfo[2]:
                         _summary = _tinfo[2][:200]
+                    _children: list = []
+                    for crow in conn.execute(
+                        "SELECT t.id, t.status, t.title FROM task_links l "
+                        "JOIN tasks t ON t.id = l.child_id WHERE l.parent_id = ?",
+                        (_tid,),
+                    ).fetchall():
+                        _children.append({
+                            "id": crow[0], "status": crow[1], "title": crow[2],
+                        })
+                    _error = (
+                        _payload_obj.get("error")
+                        or (_tinfo[4] if _tinfo and _tinfo[4] else None)
+                        or (_summary if _kind in ("gave_up", "blocked", "verification_failed") else None)
+                    )
                     event_details.append({
                         "task_id": _tid,
                         "kind": _kind,
                         "title": _title,
                         "assignee": _assignee,
                         "summary": _summary,
+                        "consecutive_failures": (
+                            _tinfo[3] if _tinfo else _payload_obj.get("failures")
+                        ),
+                        "effective_limit": _payload_obj.get("effective_limit"),
+                        "error": _error,
+                        "children": _children,
+                        "recommended_action": _ACTION_BY_KIND.get(_kind, "review"),
                     })
                 has_terminal_events = len(recent_rows) > 0
                 max_eid = max((r[0] for r in recent_rows), default=0)
@@ -2259,7 +2301,6 @@ class GatewayKanbanWatchersMixin:
         else:
             lines.append(f"[Kanban Task Loop #{current_loop}] Workers idle on {slug}.")
 
-        # Event details — count by kind.
         event_kinds: Counter = Counter()
         for ed in event_details or []:
             event_kinds[ed.get("kind", "?")] += 1
@@ -2283,7 +2324,6 @@ class GatewayKanbanWatchersMixin:
         if auto_completed:
             lines.append(f"Auto-completed parents: {', '.join(auto_completed)}")
 
-        # Stuck-tasks preview.
         if failing_ids:
             shown = failing_ids[:8]
             more = len(failing_ids) - len(shown)
@@ -2295,7 +2335,32 @@ class GatewayKanbanWatchersMixin:
 
         lines.append(f"(loop {current_loop}/{MAX_LOOPS})")
 
-        # Orchestrator instructions.
+        _kind_emoji = {
+            "completed": "✅", "blocked": "⚠️", "crashed": "❌",
+            "gave_up": "💀", "timed_out": "⏰",
+            "verification_failed": "🔬", "spawn_failed": "🚫",
+            "reclaimed": "♻️",
+        }
+        for ed in event_details or []:
+            if not isinstance(ed, dict):
+                continue
+            emoji = _kind_emoji.get(ed.get("kind"), "📌")
+            line = f"{emoji} `{ed.get('task_id','?')}` {ed.get('kind','?')} (@{ed.get('assignee','?')})"
+            if ed.get("error"):
+                line += f"\n   ⚠️ {str(ed['error'])[:200]}"
+            elif ed.get("summary"):
+                line += f"\n   {str(ed['summary'])[:200]}"
+            if ed.get("consecutive_failures") is not None:
+                line += f"\n   失败 {ed['consecutive_failures']}/{ed.get('effective_limit') or '?'}"
+            if ed.get("children"):
+                _kids = ", ".join(
+                    f"{c.get('id')}({c.get('status')})" for c in ed["children"][:4]
+                )
+                line += f"\n   子任务: {_kids}"
+            if ed.get("recommended_action"):
+                line += f"\n   → {ed['recommended_action']}"
+            lines.append(line)
+
         lines.append("")
         lines.append("--- Orchestrator Instructions ---")
         lines.append(
@@ -2796,7 +2861,15 @@ class GatewayKanbanWatchersMixin:
                             # redundant call to avoid the wasted work.
                             subs = _kb.list_notify_subs(conn)
                             if not subs:
-                                logger.debug("kanban notifier: board %s has no subscriptions", slug)
+                                try:
+                                    _owners = _kb.get_board_owners(conn, slug)
+                                except Exception:
+                                    _owners = []
+                                if not _owners:
+                                    logger.debug(
+                                        "kanban notifier: board %s has no subscriptions and no owners; nothing to deliver",
+                                        slug,
+                                    )
                             for sub in subs:
                                 owner_profile = sub.get("notifier_profile") or None
                                 if owner_profile and owner_profile != notifier_profile:
