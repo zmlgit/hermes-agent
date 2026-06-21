@@ -252,6 +252,35 @@ def test_detect_task_loop_multi_event_batched_correctness(isolated_home):
     assert ed["p3"]["error"] == "boom"
 
 
+def test_detect_task_loop_dedups_same_task_multiple_events(isolated_home):
+    """When a task has multiple terminal events in one tick (e.g. blocked
+    then completed), only the LATEST event should appear — the final state
+    is what matters for orchestrator decision-making."""
+    runner = _make_runner()
+    board = "dedup-test"
+    _seed_board(
+        isolated_home, board,
+        owners=[("feishu", "chat_f")],
+        tasks=[("t1", "done", "dupe-task")],
+        events=[
+            ("t1", "blocked", {"reason": "already done elsewhere"}),
+            ("t1", "completed", {"summary": "resolved — closing dupe"}),
+        ],
+    )
+
+    stats = runner._detect_task_loop(board, [], runner.task_loop_engine._last_event_id)
+    assert stats is not None
+    ed = stats["event_details"]
+    t1_events = [e for e in ed if e["task_id"] == "t1"]
+    assert len(t1_events) == 1, (
+        f"same task should appear once (latest event only); got {len(t1_events)}: {t1_events}"
+    )
+    assert t1_events[0]["kind"] == "completed", (
+        f"latest event should be 'completed' not 'blocked'; got {t1_events[0]['kind']}"
+    )
+    assert "resolved" in (t1_events[0]["summary"] or "")
+
+
 @pytest.mark.asyncio
 async def test_live_callback_injects_to_all_owners(isolated_home):
     runner = _make_runner()

@@ -1449,8 +1449,16 @@ class GatewayKanbanWatchersMixin:
                         (cutoff,),
                     ).fetchall()
 
+                _latest_by_task: dict = {}
+                for r in recent_rows:
+                    _eid, _tid, _kind, _payload = r
+                    _existing = _latest_by_task.get(_tid)
+                    if _existing is None or _eid > _existing[0]:
+                        _latest_by_task[_tid] = r
+                deduped_rows = sorted(_latest_by_task.values(), key=lambda x: x[0], reverse=True)
+
                 event_details: list = []
-                all_tids = [r[1] for r in recent_rows]
+                all_tids = [r[1] for r in deduped_rows]
                 _tid_ph = ",".join("?" * len(all_tids)) or "''"
                 tinfo_rows = conn.execute(
                     "SELECT id, title, assignee, result, consecutive_failures, "
@@ -1470,7 +1478,7 @@ class GatewayKanbanWatchersMixin:
                     children_by_parent.setdefault(crow[0], []).append({
                         "id": crow[1], "status": crow[2], "title": crow[3],
                     })
-                for r in recent_rows:
+                for r in deduped_rows:
                     _eid, _tid, _kind, _payload = r
                     _tinfo = tinfo_by_id.get(_tid)
                     _title = _tinfo[1] if _tinfo else "?"
@@ -1505,7 +1513,7 @@ class GatewayKanbanWatchersMixin:
                         "children": _children,
                         "recommended_action": _ACTION_BY_KIND.get(_kind, "review"),
                     })
-                has_terminal_events = len(recent_rows) > 0
+                has_terminal_events = len(deduped_rows) > 0
                 max_eid = max((r[0] for r in recent_rows), default=0)
             finally:
                 conn.close()
