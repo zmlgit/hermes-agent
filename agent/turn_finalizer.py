@@ -128,6 +128,50 @@ def finalize_turn(
         and not failed
     )
 
+    # ── Kanban worker exit guard ──────────────────────────────────────
+    # If running as a kanban worker and the conversation completed
+    # (finish_reason=stop, model returned text) but the worker never
+    # called kanban_complete/kanban_block, the task will still be
+    # "running" in the DB.  Without this guard the dispatcher detects
+    # rc=0 + task=running → protocol_violation and blocks the task.
+    # We detect that situation and record a failure so it counts
+    # toward the consecutive_failures circuit breaker.
+    _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
+    if _kanban_task and completed and not interrupted:
+        try:
+            from hermes_cli import kanban_db as _kb
+            _conn = _kb.connect()
+            try:
+                _task = _kb.get_task(_conn, _kanban_task)
+                if _task and _task.status == "running":
+                    _kb._record_task_failure(
+                        _conn,
+                        _kanban_task,
+                        error=(
+                            "worker exited cleanly (rc=0) without calling "
+                            "kanban_complete or kanban_block"
+                        ),
+                        outcome="protocol_violation",
+                        release_claim=True,
+                        end_run=True,
+                    )
+                    logger.info(
+                        "recorded protocol_violation failure for kanban task %s "
+                        "(worker exit guard in finalize_turn)",
+                        _kanban_task,
+                    )
+            finally:
+                try:
+                    _conn.close()
+                except Exception:
+                    pass
+        except Exception:
+            logger.warning(
+                "Failed to record protocol_violation for kanban task %s",
+                _kanban_task,
+                exc_info=True,
+            )
+
     # Post-loop cleanup must never lose the response.  Trajectory save,
     # resource teardown, and session persistence all touch fallible
     # surfaces — file I/O / JSON serialization (_save_trajectory), remote

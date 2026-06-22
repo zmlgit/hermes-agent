@@ -7436,6 +7436,104 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 _update_prompts.pop(_quick_key, None)
 
+        # M3: Intercept messages that reply to a pending block options
+        # card.  When the notifier pushed a numbered option block to a
+        # chat, it recorded an invite in ``self._pending_block_invites``.
+        # A bare digit (1..N) or a recognized block keyword ("跳过" /
+        # "skip" / "取消" / "cancel") from the *same chat* resolves the
+        # invite, unblocks the task, and short-circuits the LLM.
+        #
+        # P0 fix (reviewer t_79b91e39): without the pending-invite
+        # guard, group chat messages like "port 5432" or "PR #123" or
+        # "status 404" would trigger accidental unblock.  The
+        # ``is_block_reply_text`` + pending-invite check ensures we
+        # only consume messages that are *actually* replying to a block
+        # card we just sent.
+        try:
+            from gateway.block_options import (
+                consume_block_invite as _consume_invite,
+                is_block_reply_text as _is_block_reply,
+                resolve_block_reply as _resolve_reply,
+                is_block_options_enabled as _opt_enabled,
+                is_auto_reply_enabled as _auto_reply,
+            )
+            _invite_store = getattr(self, "_pending_block_invites", None)
+            if (
+                isinstance(_invite_store, dict)
+                and _invite_store
+                and _opt_enabled()
+                and _auto_reply()
+            ):
+                _raw_reply = (event.text or "").strip()
+                # Slash commands always pass through — the user clearly
+                # wanted to issue a command, not answer a block card.
+                if _raw_reply and not _raw_reply.startswith("/"):
+                    _peek = _invite_store.get(_quick_key)
+                    if _peek is not None:
+                        _num_opts = int(_peek.get("num_options") or 0)
+                        if _is_block_reply(_raw_reply, _num_opts):
+                            _rec = _consume_invite(_invite_store, _quick_key)
+                            if _rec is not None:
+                                try:
+                                    _plan = _resolve_reply(
+                                        _raw_reply, _rec.get("reason", ""),
+                                    )
+                                except Exception:
+                                    _plan = None
+                                if _plan and _plan.get("unblock"):
+                                    # Add a comment to the task + unblock.
+                                    # Best-effort: a DB error here must not
+                                    # poison the message path.
+                                    _tid = str(_rec.get("task_id") or "")
+                                    if not _tid:
+                                        # Defensive — an empty task_id
+                                        # shouldn't reach here, but if it
+                                        # does, surface a clear error
+                                        # rather than passing None to DB.
+                                        return (
+                                            "⚠️ Block reply captured but the "
+                                            "task id was missing on the "
+                                            "pending invite. Please retry "
+                                            "from the original message."
+                                        )
+                                    _comment = _plan.get("comment") or _raw_reply
+                                    _opt_text = _plan.get("option_text") or _raw_reply
+                                    try:
+                                        from hermes_cli import kanban_db as _kb
+                                        _conn = _kb.connect()
+                                        try:
+                                            _kb.add_comment(
+                                                _conn, _tid, "user", _comment,
+                                            )
+                                            _kb.unblock_task(_conn, _tid)
+                                        finally:
+                                            _conn.close()
+                                    except Exception as _unblock_exc:
+                                        logger.warning(
+                                            "block-reply unblock failed for %s: %s",
+                                            _tid, _unblock_exc,
+                                        )
+                                        return (
+                                            f"⚠️ Block decision \"{_opt_text}\" "
+                                            f"captured but the unblock write "
+                                            f"failed. Run "
+                                            f"`hermes kanban unblock {_tid}` "
+                                            f"to retry."
+                                        )
+                                    return (
+                                        f"✓ Unblocked {_tid} "
+                                        f"(decision: {_opt_text}). "
+                                        f"The worker will resume on the next "
+                                        f"dispatch tick."
+                                    )
+        except Exception as _block_hook_exc:
+            # The hook is a nice-to-have — a bug here must never
+            # prevent normal message dispatch.
+            logger.debug(
+                "block-reply hook failed for %s: %s",
+                _quick_key, _block_hook_exc,
+            )
+
         # Intercept messages that are responses to a pending clarify
         # request that is awaiting free-form text (either an open-ended
         # clarify with no choices, or one where the user picked the
