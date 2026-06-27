@@ -30,7 +30,7 @@ Usage (gateway side):
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, FrozenSet, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,14 @@ class PlatformEntry:
     # platform as a valid ``deliver=<name>`` target and reads the env var to
     # resolve the default chat/room ID.  Empty = no cron home-channel support.
     cron_deliver_env_var: str = ""
+
+    # ── Port-free connection modes (multiplex-safe) ──
+    # Connection modes (e.g. "websocket") that are outbound-only and do NOT
+    # bind a port. Under gateway.multiplex_profiles, these modes are allowed
+    # on secondary profiles because they don't conflict with the default
+    # profile's port-bound listener. Webhook/http modes are NOT port-free;
+    # they bind a TCPSite and thus only work on the default profile.
+    port_free_connection_modes: FrozenSet[str] = field(default_factory=frozenset)
 
     # ── Standalone (out-of-process) sending ──
     # Optional: async coroutine that delivers a message without a live

@@ -209,7 +209,11 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
         adapter = FeishuAdapter(PlatformConfig())
-        ws_client = SimpleNamespace()
+        ws_client = SimpleNamespace(
+            _connect=AsyncMock(),
+            _ping_loop=AsyncMock(),
+            _disconnect=AsyncMock(),
+        )
 
         with (
             patch("plugins.platforms.feishu.adapter.FEISHU_AVAILABLE", True),
@@ -217,7 +221,6 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
             patch("plugins.platforms.feishu.adapter.lark", SimpleNamespace(LogLevel=SimpleNamespace(INFO="INFO", WARNING="WARNING"))),
             patch("plugins.platforms.feishu.adapter.EventDispatcherHandler") as mock_handler_class,
             patch("plugins.platforms.feishu.adapter.FeishuWSClient", return_value=ws_client),
-            patch("plugins.platforms.feishu.adapter._run_official_feishu_ws_client"),
             patch("plugins.platforms.feishu.adapter.acquire_scoped_lock", return_value=(True, None)) as acquire_lock,
             patch("plugins.platforms.feishu.adapter.release_scoped_lock") as release_lock,
             patch.object(adapter, "_hydrate_bot_identity", new=AsyncMock()),
@@ -229,12 +232,21 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
             future = loop.create_future()
             future.set_result(None)
 
+            class _Task:
+                def done(self):
+                    return False
+                def cancel(self):
+                    pass
+
             class _Loop:
                 def run_in_executor(self, *_args, **_kwargs):
                     return future
 
                 def is_closed(self):
                     return False
+
+                def create_task(self, coro):
+                    return _Task()
 
             try:
                 with patch("plugins.platforms.feishu.adapter.asyncio.get_running_loop", return_value=_Loop()):
@@ -286,7 +298,11 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
         adapter = FeishuAdapter(PlatformConfig())
-        ws_client = SimpleNamespace()
+        ws_client = SimpleNamespace(
+            _connect=AsyncMock(side_effect=[OSError("temporary ws failure"), None]),
+            _ping_loop=AsyncMock(),
+            _disconnect=AsyncMock(),
+        )
         sleeps = []
 
         with (
@@ -307,18 +323,18 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
             future = loop.create_future()
             future.set_result(None)
 
+            class _Task:
+                def done(self):
+                    return False
+                def cancel(self):
+                    pass
+
             class _Loop:
-                def __init__(self):
-                    self.calls = 0
-
-                def run_in_executor(self, *_args, **_kwargs):
-                    self.calls += 1
-                    if self.calls == 1:
-                        raise OSError("temporary websocket failure")
-                    return future
-
                 def is_closed(self):
                     return False
+
+                def create_task(self, coro):
+                    return _Task()
 
             fake_loop = _Loop()
             try:
@@ -329,7 +345,6 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
 
         self.assertTrue(connected)
         self.assertEqual(sleeps, [1])
-        self.assertEqual(fake_loop.calls, 2)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_edit_message_updates_existing_feishu_message(self):
@@ -504,60 +519,10 @@ class TestAdapterModule(unittest.TestCase):
         self.assertIsNone(settings.ws_ping_interval)
         self.assertIsNone(settings.ws_ping_timeout)
 
-    def test_runtime_ws_overrides_reapply_after_sdk_configure(self):
-        import sys
-        from types import ModuleType
-
-        class _FakeWSClient:
-            def __init__(self):
-                self._reconnect_nonce = 30
-                self._reconnect_interval = 120
-                self._ping_interval = 120
-                self.configure_calls = []
-
-            def _configure(self, conf):
-                self.configure_calls.append(conf)
-                self._reconnect_nonce = conf.ReconnectNonce
-                self._reconnect_interval = conf.ReconnectInterval
-                self._ping_interval = conf.PingInterval
-
-            def start(self):
-                conf = SimpleNamespace(ReconnectNonce=99, ReconnectInterval=88, PingInterval=77)
-                self._configure(conf)
-                raise RuntimeError("stop test client")
-
-        fake_client = _FakeWSClient()
-        fake_adapter = SimpleNamespace(
-            _ws_thread_loop=None,
-            _ws_reconnect_nonce=2,
-            _ws_reconnect_interval=3,
-            _ws_ping_interval=4,
-            _ws_ping_timeout=5,
-        )
-        fake_client_module = ModuleType("lark_oapi.ws.client")
-        fake_client_module.loop = None
-        fake_client_module.websockets = SimpleNamespace(connect=AsyncMock())
-        fake_ws_module = ModuleType("lark_oapi.ws")
-        fake_ws_module.client = fake_client_module
-        fake_root_module = ModuleType("lark_oapi")
-        fake_root_module.ws = fake_ws_module
-
-        original_modules = sys.modules.copy()
-        sys.modules["lark_oapi"] = fake_root_module
-        sys.modules["lark_oapi.ws"] = fake_ws_module
-        sys.modules["lark_oapi.ws.client"] = fake_client_module
-        try:
-            from plugins.platforms.feishu.adapter import _run_official_feishu_ws_client
-
-            _run_official_feishu_ws_client(fake_client, fake_adapter)
-        finally:
-            sys.modules.clear()
-            sys.modules.update(original_modules)
-
-        self.assertEqual(len(fake_client.configure_calls), 1)
-        self.assertEqual(fake_client._reconnect_nonce, 2)
-        self.assertEqual(fake_client._reconnect_interval, 3)
-        self.assertEqual(fake_client._ping_interval, 4)
+    # NOTE: test_runtime_ws_overrides_reapply_after_sdk_configure was removed
+    # because it tested _run_official_feishu_ws_client() — a thread-based WS
+    # client runner that has been replaced by _start_ws_client_on_shared_loop().
+    # The runtime-override logic is now applied directly in that method.
 
 
 def _admits_group(adapter, message, sender_id, chat_id=""):

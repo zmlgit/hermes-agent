@@ -207,6 +207,28 @@ class _ComponentFilter(logging.Filter):
         return record.name.startswith(self._prefixes)
 
 
+class _BenignLarkDisconnectFilter(logging.Filter):
+    """Suppress a known benign Lark SDK websocket close noise line.
+
+    The official Lark/Feishu SDK sometimes logs an ERROR-level line when the
+    websocket closes without a formal close frame, then immediately reconnects
+    successfully. We suppress only that exact noise pattern so real Lark errors
+    still reach operator logs.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.ERROR:
+            return True
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        return not (
+            "receive message loop exit" in message
+            and "no close frame received or sent" in message
+        )
+
+
 # Logger name prefixes that belong to each component.
 # Used by _ComponentFilter and exposed for ``hermes logs --component``.
 COMPONENT_PREFIXES = {
@@ -226,6 +248,13 @@ COMPONENT_PREFIXES = {
         "uvicorn",
     ),
 }
+
+
+def _install_benign_logger_filters() -> None:
+    """Attach selective noise filters to third-party loggers once."""
+    lark_logger = logging.getLogger("Lark")
+    if not any(isinstance(f, _BenignLarkDisconnectFilter) for f in lark_logger.filters):
+        lark_logger.addFilter(_BenignLarkDisconnectFilter())
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +376,7 @@ def setup_logging(
     # Suppress noisy third-party loggers.
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+    _install_benign_logger_filters()
 
     _logging_initialized = True
     return log_dir
@@ -380,6 +410,7 @@ def setup_verbose_logging() -> None:
     # Keep third-party libraries at WARNING to reduce noise.
     for name in _NOISY_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+    _install_benign_logger_filters()
     # rex-deploy at INFO for sandbox status.
     logging.getLogger("rex-deploy").setLevel(logging.INFO)
 

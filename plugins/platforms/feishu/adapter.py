@@ -1281,69 +1281,6 @@ def _strip_edge_self_mentions(
             return remaining
 
 
-def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
-    """Run the official Lark WS client in its own thread-local event loop."""
-    import lark_oapi.ws.client as ws_client_module
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    ws_client_module.loop = loop
-    adapter._ws_thread_loop = loop
-
-    original_connect = ws_client_module.websockets.connect
-    original_configure = getattr(ws_client, "_configure", None)
-
-    def _apply_runtime_ws_overrides() -> None:
-        try:
-            setattr(ws_client, "_reconnect_nonce", adapter._ws_reconnect_nonce)
-            setattr(ws_client, "_reconnect_interval", adapter._ws_reconnect_interval)
-            if adapter._ws_ping_interval is not None:
-                setattr(ws_client, "_ping_interval", adapter._ws_ping_interval)
-        except Exception:
-            logger.debug("[Feishu] Failed to apply websocket runtime overrides", exc_info=True)
-
-    def _connect_with_overrides(*args: Any, **kwargs: Any) -> Any:
-        if adapter._ws_ping_interval is not None and "ping_interval" not in kwargs:
-            kwargs["ping_interval"] = adapter._ws_ping_interval
-        if adapter._ws_ping_timeout is not None and "ping_timeout" not in kwargs:
-            kwargs["ping_timeout"] = adapter._ws_ping_timeout
-        return original_connect(*args, **kwargs)
-
-    def _configure_with_overrides(conf: Any) -> Any:
-        if original_configure is None:
-            raise RuntimeError("Feishu _configure_with_overrides called but original_configure is None")
-        result = original_configure(conf)
-        _apply_runtime_ws_overrides()
-        return result
-
-    ws_client_module.websockets.connect = _connect_with_overrides
-    if original_configure is not None:
-        setattr(ws_client, "_configure", _configure_with_overrides)
-    _apply_runtime_ws_overrides()
-    try:
-        ws_client.start()
-    except Exception:
-        pass
-    finally:
-        ws_client_module.websockets.connect = original_connect
-        if original_configure is not None:
-            setattr(ws_client, "_configure", original_configure)
-        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
-        for task in pending:
-            task.cancel()
-        if pending:
-            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        try:
-            loop.stop()
-        except Exception:
-            pass
-        try:
-            loop.close()
-        except Exception:
-            pass
-        adapter._ws_thread_loop = None
-
-
 def check_feishu_requirements() -> bool:
     """Check if Feishu/Lark dependencies are available.
 
@@ -1433,6 +1370,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws_client: Optional[Any] = None
         self._ws_future: Optional[asyncio.Future] = None
         self._ws_thread_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._ws_ping_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._webhook_runner: Optional[Any] = None
         self._webhook_site: Optional[Any] = None
@@ -1697,6 +1635,8 @@ class FeishuAdapter(BasePlatformAdapter):
         await self._cancel_pending_tasks(self._pending_text_batch_tasks)
         await self._cancel_pending_tasks(self._pending_media_batch_tasks)
         self._reset_batch_buffers()
+        ws_client_teardown = self._ws_client
+        ping_task_teardown = self._ws_ping_task
         self._disable_websocket_auto_reconnect()
         await self._stop_webhook_server()
 
@@ -1728,6 +1668,14 @@ class FeishuAdapter(BasePlatformAdapter):
 
         self._ws_future = None
         self._ws_thread_loop = None
+        if ping_task_teardown is not None and not ping_task_teardown.done():
+            ping_task_teardown.cancel()
+        if ws_client_teardown is not None:
+            try:
+                await ws_client_teardown._disconnect()
+            except Exception:
+                logger.debug("[Feishu] shared-loop WS teardown error", exc_info=True)
+        self._ws_ping_task = None
         self._loop = None
         self._event_handler = None
         self._persist_seen_message_ids()
@@ -4584,12 +4532,54 @@ class FeishuAdapter(BasePlatformAdapter):
             event_handler=self._event_handler,
             domain=domain,
         )
-        self._ws_future = loop.run_in_executor(
-            None,
-            _run_official_feishu_ws_client,
-            self._ws_client,
-            self,
-        )
+        await self._start_ws_client_on_shared_loop(loop)
+
+    async def _start_ws_client_on_shared_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Run the Lark WS client on the gateway's shared loop (multiplex-safe).
+
+        The legacy threaded model overwrote lark's module-global ``loop`` per
+        client, so >1 Feishu client per process crashed with a cross-loop Future
+        error. Sharing the gateway loop fixes it. Do NOT revert to a per-client
+        thread/loop.
+
+        NOTE: ``lark_oapi.ws.client.loop`` is module-global state.  Only one
+        active Feishu WS client is allowed per process (webhook mode doesn't use
+        WS, so it's unaffected).  If a second WS client connects it will
+        overwrite the first client's loop — this is a configuration error, not
+        a runtime race.
+
+        Startup probe: verify the private SDK methods we depend on still exist.
+        ``lark-oapi`` is pinned to ``==1.5.x`` in ``pyproject.toml``; this probe
+        catches silent ABI breaks on unplanned version bumps.
+        """
+        import lark_oapi.ws.client as ws_client_module
+
+        for _method_name in ("_connect", "_ping_loop", "_disconnect"):
+            if not hasattr(self._ws_client, _method_name):
+                raise RuntimeError(
+                    f"Lark WS client missing expected private method "
+                    f"{_method_name!r} — the installed lark-oapi version "
+                    f"may be incompatible. Pinned to ==1.5.x in pyproject.toml "
+                    f"(extra 'feishu')."
+                )
+
+        ws_client_module.loop = loop
+
+        try:
+            setattr(self._ws_client, "_reconnect_nonce", self._ws_reconnect_nonce)
+            setattr(self._ws_client, "_reconnect_interval", self._ws_reconnect_interval)
+            if self._ws_ping_interval is not None:
+                setattr(self._ws_client, "_ping_interval", self._ws_ping_interval)
+            setattr(self._ws_client, "_auto_reconnect", True)
+        except Exception:
+            logger.debug("[Feishu] Failed to apply WS runtime overrides", exc_info=True)
+        # NOTE: setattr on Lark SDK private attributes is a workaround — the
+        # official SDK does not expose public setters for these runtime params.
+
+        await self._ws_client._connect()
+        self._ws_ping_task = loop.create_task(self._ws_client._ping_loop())
+        self._ws_thread_loop = None
+        self._ws_future = None
 
     async def _connect_webhook(self) -> None:
         if not FEISHU_WEBHOOK_AVAILABLE:
@@ -5509,4 +5499,7 @@ def register(ctx) -> None:
         max_message_length=8000,
         emoji="🪽",
         allow_update_command=True,
+        # WebSocket mode is outbound-only (no port bind), so it's safe
+        # under gateway.multiplex_profiles on secondary profiles.
+        port_free_connection_modes=frozenset({"websocket"}),
     )

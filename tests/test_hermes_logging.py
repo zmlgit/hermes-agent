@@ -158,6 +158,38 @@ class TestSetupLogging:
         assert logging.getLogger("httpx").level >= logging.WARNING
         assert logging.getLogger("httpcore").level >= logging.WARNING
 
+    def test_suppresses_benign_lark_ws_disconnect_noise(self, hermes_home):
+        """Known Lark websocket close noise should not pollute operator logs."""
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+
+        logging.getLogger("Lark").error(
+            "receive message loop exit, err: no close frame received or sent "
+            "[conn_id=7655687350400912347]"
+        )
+
+        for h in logging.getLogger().handlers:
+            h.flush()
+
+        agent_log = hermes_home / "logs" / "agent.log"
+        errors_log = hermes_home / "logs" / "errors.log"
+        assert "no close frame received or sent" not in agent_log.read_text()
+        if errors_log.exists():
+            assert "no close frame received or sent" not in errors_log.read_text()
+
+    def test_keeps_non_benign_lark_errors(self, hermes_home):
+        """Suppress only the known benign disconnect line, not real Lark errors."""
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+
+        logging.getLogger("Lark").error("request failed with 401 invalid tenant access token")
+
+        for h in logging.getLogger().handlers:
+            h.flush()
+
+        agent_log = hermes_home / "logs" / "agent.log"
+        errors_log = hermes_home / "logs" / "errors.log"
+        assert "invalid tenant access token" in agent_log.read_text()
+        assert "invalid tenant access token" in errors_log.read_text()
+
     def test_writes_to_agent_log(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home)
 

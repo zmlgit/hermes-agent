@@ -1448,6 +1448,68 @@ def _profile_runtime_scope(profile_home: "Path"):
         reset_hermes_home_override(home_token)
 
 
+# Process-wide lock serializing _profile_env_bridge accesses.
+# os.environ is a process-global dict — concurrent mutation from parallel
+# profile-setup threads would interleave overlays. This RLock ensures
+# only one bridge is active at a time.
+_env_bridge_lock = threading.RLock()
+
+
+@_contextmanager
+def _profile_env_bridge(profile_home: "Path"):
+    """Temporarily overlay a profile's .env onto os.environ during synchronous
+    setup (config-load + adapter construction) so legacy ``os.getenv`` reads
+    resolve to the profile's own values (FEISHU_GROUP_POLICY, ALLOW_ALL_USERS,
+    ALLOW_BOTS, …) instead of the default profile's process-global values.
+
+    SAFETY NOTE
+    -----------
+    This function mutates the process-global ``os.environ``, which is
+    fundamentally less safe than ``_profile_runtime_scope`` (contextvar-based,
+    thread-safe). Use ONLY for synchronous setup (config load + adapter
+    construction) and NEVER for agent-turn code.
+
+    Current mitigations (not exhaustive):
+    - ``_env_bridge_lock`` (``threading.RLock``) serializes concurrent bridges.
+    - Global env vars (``_is_global_env``) are skipped.
+    - ``os.environ`` is restored to its pre-bridge state on exit.
+
+    Known residual risks (accepted):
+    - Thread/connection-pool objects created during setup capture ``os.environ``
+      by reference and survive past the bridge's restore (httpx/requests
+      transports, aiohttp connector threads, etc.).
+    - ``/proc/self/environ``, core dumps, and exception reporters can observe
+      the overlaid values.
+    - Subprocess creation during setup inherits the overlaid values (the code
+      path is audited to avoid subprocesses; this is not enforced at runtime).
+
+    Agent turns use ``_profile_runtime_scope`` alone (no bridge) so subprocesses
+    (MCP, kanban, terminal) cannot inherit another profile's secrets — that
+    isolation is load-bearing.
+    """
+    from agent.secret_scope import load_env_file, _is_global_env
+    env_path = Path(profile_home) / ".env"
+    if not env_path.exists():
+        yield
+        return
+    overlay = load_env_file(env_path)
+    saved: Dict[str, Optional[str]] = {}
+    with _env_bridge_lock:
+        try:
+            for _key, _val in overlay.items():
+                if _is_global_env(_key):
+                    continue
+                saved[_key] = os.environ.get(_key)
+                os.environ[_key] = _val
+            yield
+        finally:
+            for _key, _prev in saved.items():
+                if _prev is None:
+                    os.environ.pop(_key, None)
+                else:
+                    os.environ[_key] = _prev
+
+
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
 _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS = {"/output", "/outputs"}
 
@@ -7435,7 +7497,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Create+connect one profile's adapters under its runtime scope."""
         from gateway.config import load_gateway_config
 
-        with _profile_runtime_scope(profile_home):
+        with _profile_runtime_scope(profile_home), _profile_env_bridge(profile_home):
             profile_cfg = load_gateway_config()
 
         profile_map = self._profile_adapters.setdefault(profile_name, {})
@@ -7447,18 +7509,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # default profile's listener already serves every profile via the
             # /p/<profile>/ prefix, so a second bind can only collide. This is a
             # config error, not a transient failure — fail fast and loud.
-            if platform.value in _PORT_BINDING_PLATFORM_VALUES:
+            # Some platforms declare port-free connection modes (e.g. feishu
+            # WebSocket mode is outbound-only) via their PlatformEntry.
+            # Those modes are safe under multiplex and are excluded here.
+            from gateway.platform_registry import platform_registry as _platform_registry
+            _entry = _platform_registry.get(platform.value)
+            _port_free = _entry.port_free_connection_modes if _entry else frozenset()
+            _mode = getattr(platform_config, "extra", {}).get("connection_mode") or "webhook"
+            if platform.value in _PORT_BINDING_PLATFORM_VALUES and _mode not in _port_free:
+                if _port_free:
+                    _hint = (
+                        f"platform '{platform.value}' is in '{_mode}' mode which binds "
+                        f"a port owned by the default profile. Switch to a port-free mode "
+                        f"{sorted(_port_free)} or remove this platform from profile "
+                        f"'{profile_name}' (configure it only on the default profile)."
+                    )
+                else:
+                    _hint = (
+                        f"the default profile owns the single shared HTTP listener "
+                        f"and serves every profile through the /p/{profile_name}/ URL "
+                        f"prefix — a secondary profile cannot bind its own port. Remove "
+                        f"platforms.{platform.value} from profile '{profile_name}'s "
+                        f"config.yaml (configure it only on the default profile)."
+                    )
                 raise MultiplexConfigError(
                     f"Profile '{profile_name}' enables the port-binding platform "
-                    f"'{platform.value}', but gateway.multiplex_profiles is on. The "
-                    f"default profile owns the single shared HTTP listener and "
-                    f"serves every profile through the /p/{profile_name}/ URL "
-                    f"prefix — a secondary profile cannot bind its own port. "
-                    f"Remove platforms.{platform.value} from profile "
-                    f"'{profile_name}'s config.yaml (configure it only on the "
-                    f"default profile)."
+                    f"'{platform.value}', but gateway.multiplex_profiles is on: {_hint}"
                 )
-            with _profile_runtime_scope(profile_home):
+            with _profile_runtime_scope(profile_home), _profile_env_bridge(profile_home):
                 adapter = self._create_adapter(platform, platform_config)
             if not adapter:
                 continue
@@ -7468,6 +7546,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if fp is not None:
                 owner = claimed.get((platform, fp))
                 if owner is not None:
+                    if getattr(self.config, "multiplex_profiles", False):
+                        # Under multiplex, non-default profiles commonly share the
+                        # default profile's credentials (same WeChat/Telegram token).
+                        # This is expected — skip silently with a DEBUG log and
+                        # discard the unconnected adapter (no resources to clean).
+                        logger.debug(
+                            "Profile '%s' shares %s credential with profile '%s'; "
+                            "skipping (expected under multiplex).",
+                            profile_name, platform.value, owner,
+                        )
+                        continue
                     logger.error(
                         "Profile '%s' and '%s' both configure %s with the same "
                         "credential — refusing to start the duplicate (a single "

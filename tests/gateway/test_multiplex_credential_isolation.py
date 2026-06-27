@@ -61,6 +61,24 @@ class TestRuntimeProviderUsesScope:
         assert _getenv("HERMES_MAX_ITERATIONS") == "42"
 
 
+class TestGatewayConfigEnvOverridesUseScope:
+    """Gateway platform env overrides must not leak default-profile secrets."""
+
+    def test_weixin_env_override_does_not_leak_global_token_in_multiplex(self, monkeypatch):
+        from gateway.config import GatewayConfig, Platform, _apply_env_overrides
+
+        monkeypatch.setenv("WEIXIN_TOKEN", "tok-global-leak")
+        monkeypatch.setenv("WEIXIN_ACCOUNT_ID", "wx-global-leak")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({})
+        try:
+            config = GatewayConfig()
+            _apply_env_overrides(config)
+            assert Platform.WEIXIN not in config.platforms
+        finally:
+            ss.reset_secret_scope(token)
+
+
 class TestMcpInterpolationUsesScope:
     """MCP config ${VAR} interpolation resolves through the secret scope."""
 

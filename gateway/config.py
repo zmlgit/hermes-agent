@@ -1522,8 +1522,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         )
 
     # API Server
-    api_server_enabled = os.getenv("API_SERVER_ENABLED", "").lower() in {"true", "1", "yes"}
-    api_server_key = os.getenv("API_SERVER_KEY", "")
+    # Scope-aware enablement — same rationale as the feishu block (do NOT revert to os.getenv).
+    from agent.secret_scope import get_secret as _get_secret_api
+    api_server_enabled = (_get_secret_api("API_SERVER_ENABLED") or "").lower() in {"true", "1", "yes"}
+    api_server_key = _get_secret_api("API_SERVER_KEY") or ""
     api_server_cors_origins = os.getenv("API_SERVER_CORS_ORIGINS", "")
     api_server_port = os.getenv("API_SERVER_PORT")
     api_server_host = os.getenv("API_SERVER_HOST")
@@ -1641,8 +1643,12 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             )
 
     # Feishu / Lark
-    feishu_app_id = os.getenv("FEISHU_APP_ID")
-    feishu_app_secret = os.getenv("FEISHU_APP_SECRET")
+    # Scope-aware read: under multiplex, os.getenv would leak another profile's
+    # credentials; get_secret reads the active profile's .env (and falls back to
+    # os.environ when multiplex is off — legacy behavior). Do NOT revert to os.getenv.
+    from agent.secret_scope import get_secret as _get_secret
+    feishu_app_id = _get_secret("FEISHU_APP_ID")
+    feishu_app_secret = _get_secret("FEISHU_APP_SECRET")
     if feishu_app_id and feishu_app_secret:
         if Platform.FEISHU not in config.platforms:
             config.platforms[Platform.FEISHU] = PlatformConfig()
@@ -1650,22 +1656,22 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         config.platforms[Platform.FEISHU].extra.update({
             "app_id": feishu_app_id,
             "app_secret": feishu_app_secret,
-            "domain": os.getenv("FEISHU_DOMAIN", "feishu"),
-            "connection_mode": os.getenv("FEISHU_CONNECTION_MODE", "websocket"),
+            "domain": _get_secret("FEISHU_DOMAIN", "feishu"),
+            "connection_mode": _get_secret("FEISHU_CONNECTION_MODE", "websocket"),
         })
-        feishu_encrypt_key = os.getenv("FEISHU_ENCRYPT_KEY", "")
+        feishu_encrypt_key = _get_secret("FEISHU_ENCRYPT_KEY", "")
         if feishu_encrypt_key:
             config.platforms[Platform.FEISHU].extra["encrypt_key"] = feishu_encrypt_key
-        feishu_verification_token = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+        feishu_verification_token = _get_secret("FEISHU_VERIFICATION_TOKEN", "")
         if feishu_verification_token:
             config.platforms[Platform.FEISHU].extra["verification_token"] = feishu_verification_token
-        feishu_home = os.getenv("FEISHU_HOME_CHANNEL")
+        feishu_home = _get_secret("FEISHU_HOME_CHANNEL")
         if feishu_home:
             config.platforms[Platform.FEISHU].home_channel = HomeChannel(
                 platform=Platform.FEISHU,
                 chat_id=feishu_home,
-                name=os.getenv("FEISHU_HOME_CHANNEL_NAME", "Home"),
-                thread_id=os.getenv("FEISHU_HOME_CHANNEL_THREAD_ID") or None,
+                name=_get_secret("FEISHU_HOME_CHANNEL_NAME", "Home"),
+                thread_id=_get_secret("FEISHU_HOME_CHANNEL_THREAD_ID") or None,
             )
 
     # WeCom (Enterprise WeChat)
@@ -1709,8 +1715,11 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         })
 
     # Weixin (personal WeChat via iLink Bot API)
-    weixin_token = os.getenv("WEIXIN_TOKEN")
-    weixin_account_id = os.getenv("WEIXIN_ACCOUNT_ID")
+    # Scope-aware read: under multiplex, os.getenv would leak the default
+    # profile's credential into secondary profiles whose local .env leaves the
+    # vars unset/commented. Mirror Feishu's scoped secret resolution here.
+    weixin_token = _get_secret("WEIXIN_TOKEN")
+    weixin_account_id = _get_secret("WEIXIN_ACCOUNT_ID")
     if weixin_token or weixin_account_id:
         if Platform.WEIXIN not in config.platforms:
             config.platforms[Platform.WEIXIN] = PlatformConfig()
@@ -1720,34 +1729,34 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         extra = config.platforms[Platform.WEIXIN].extra
         if weixin_account_id:
             extra["account_id"] = weixin_account_id
-        weixin_base_url = os.getenv("WEIXIN_BASE_URL", "").strip()
+        weixin_base_url = _get_secret("WEIXIN_BASE_URL", "").strip()
         if weixin_base_url:
             extra["base_url"] = weixin_base_url.rstrip("/")
-        weixin_cdn_base_url = os.getenv("WEIXIN_CDN_BASE_URL", "").strip()
+        weixin_cdn_base_url = _get_secret("WEIXIN_CDN_BASE_URL", "").strip()
         if weixin_cdn_base_url:
             extra["cdn_base_url"] = weixin_cdn_base_url.rstrip("/")
-        weixin_dm_policy = os.getenv("WEIXIN_DM_POLICY", "").strip().lower()
+        weixin_dm_policy = _get_secret("WEIXIN_DM_POLICY", "").strip().lower()
         if weixin_dm_policy:
             extra["dm_policy"] = weixin_dm_policy
-        weixin_group_policy = os.getenv("WEIXIN_GROUP_POLICY", "").strip().lower()
+        weixin_group_policy = _get_secret("WEIXIN_GROUP_POLICY", "").strip().lower()
         if weixin_group_policy:
             extra["group_policy"] = weixin_group_policy
-        weixin_allowed_users = os.getenv("WEIXIN_ALLOWED_USERS", "").strip()
+        weixin_allowed_users = _get_secret("WEIXIN_ALLOWED_USERS", "").strip()
         if weixin_allowed_users:
             extra["allow_from"] = weixin_allowed_users
-        weixin_group_allowed_users = os.getenv("WEIXIN_GROUP_ALLOWED_USERS", "").strip()
+        weixin_group_allowed_users = _get_secret("WEIXIN_GROUP_ALLOWED_USERS", "").strip()
         if weixin_group_allowed_users:
             extra["group_allow_from"] = weixin_group_allowed_users
-        weixin_split_multiline = os.getenv("WEIXIN_SPLIT_MULTILINE_MESSAGES", "").strip()
+        weixin_split_multiline = _get_secret("WEIXIN_SPLIT_MULTILINE_MESSAGES", "").strip()
         if weixin_split_multiline:
             extra["split_multiline_messages"] = weixin_split_multiline
-        weixin_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
+        weixin_home = _get_secret("WEIXIN_HOME_CHANNEL", "").strip()
         if weixin_home:
             config.platforms[Platform.WEIXIN].home_channel = HomeChannel(
                 platform=Platform.WEIXIN,
                 chat_id=weixin_home,
-                name=os.getenv("WEIXIN_HOME_CHANNEL_NAME", "Home"),
-                thread_id=os.getenv("WEIXIN_HOME_CHANNEL_THREAD_ID") or None,
+                name=_get_secret("WEIXIN_HOME_CHANNEL_NAME", "Home"),
+                thread_id=_get_secret("WEIXIN_HOME_CHANNEL_THREAD_ID") or None,
             )
 
     # BlueBubbles (iMessage)
