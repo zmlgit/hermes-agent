@@ -5636,6 +5636,16 @@ def _apply_yaml_config(yaml_cfg: dict, feishu_cfg: dict) -> dict | None:
         seeded["allowed_users"] = feishu_cfg["allowed_users"]
     if "allow_all_users" in feishu_cfg:
         seeded["allow_all_users"] = feishu_cfg["allow_all_users"]
+    # Flatten feishu.extra.* so users can write either feishu.group_rules
+    # (top-level) or feishu.extra.group_rules (nested); both land in
+    # PlatformConfig.extra. Without this, nested-extra keys never reach the
+    # adapter — the shared-key bridge and direct_keys loop only scan the top
+    # level of the ``feishu:`` block. Top-level direct_keys keep precedence.
+    nested_extra = feishu_cfg.get("extra")
+    if isinstance(nested_extra, dict):
+        for nk, nv in nested_extra.items():
+            if nk not in seeded:
+                seeded[nk] = nv
     if "allow_bots" in feishu_cfg and not os.getenv("FEISHU_ALLOW_BOTS"):
         os.environ["FEISHU_ALLOW_BOTS"] = str(feishu_cfg["allow_bots"]).lower()
     return seeded or None
