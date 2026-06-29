@@ -2371,10 +2371,16 @@ class FeishuAdapter(BasePlatformAdapter):
 
         reason = self._admit(sender, message)
         if reason is not None:
-            logger.debug("[Feishu] dropping inbound event: %s", reason)
+            logger.info("[Feishu][%s] dropping inbound event: %s (chat_id=%s, sender_type=%s)",
+                        self._app_id,
+                        reason,
+                        getattr(message, "chat_id", "?"),
+                        "bot" if _is_bot_sender(sender) else "human")
             return
 
         chat_type = getattr(message, "chat_type", "p2p")
+        message_id = message_id or "?"
+        logger.info("[Feishu][%s] Admitted message %s (chat=%s, type=%s)", self._app_id, message_id, getattr(message, "chat_id", "?"), chat_type)
         await self._process_inbound_message(
             data=data,
             message=message,
@@ -4072,7 +4078,7 @@ class FeishuAdapter(BasePlatformAdapter):
             getattr(sender, "sender_id", None), chat_id, is_bot=is_bot,
         ):
             return "group_policy_rejected"
-        if require_mention and not self._mentions_self(message):
+        if require_mention and not (is_bot and self._allow_bots == "all") and not self._mentions_self(message):
             return "group_policy_rejected"
         return None
 
@@ -5456,14 +5462,23 @@ def interactive_setup() -> None:
 
 
 def _apply_yaml_config(yaml_cfg: dict, feishu_cfg: dict) -> dict | None:
-    """Translate config.yaml feishu: keys into FEISHU_* env vars.
+    """Translate config.yaml feishu: keys into FEISHU_* env vars + extra.
 
     Implements the apply_yaml_config_fn contract (#24849). Mirrors the legacy
     feishu_cfg block from gateway/config.py::load_gateway_config() (allow_bots).
-    Env vars take precedence over YAML. Returns None — flows through env.
+    Env vars take precedence over YAML.
+
+    Returns the ``extra`` sub-dict so group_rules, default_group_policy, and
+    other per-profile settings from ``feishu.extra`` in config.yaml survive
+    the gateway config loading pipeline — without this return, the extra dict
+    is lost (only app_id/app_secret/domain/connection_mode get populated by
+    _apply_env_overrides in gateway/config.py).
     """
     if "allow_bots" in feishu_cfg and not os.getenv("FEISHU_ALLOW_BOTS"):
         os.environ["FEISHU_ALLOW_BOTS"] = str(feishu_cfg["allow_bots"]).lower()
+    extra = feishu_cfg.get("extra")
+    if isinstance(extra, dict) and extra:
+        return dict(extra)
     return None
 
 
