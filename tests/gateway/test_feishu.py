@@ -4,11 +4,12 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from collections import OrderedDict
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Dict
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -558,6 +559,75 @@ class TestAdapterModule(unittest.TestCase):
         self.assertEqual(fake_client._reconnect_nonce, 2)
         self.assertEqual(fake_client._reconnect_interval, 3)
         self.assertEqual(fake_client._ping_interval, 4)
+
+
+class TestThreadLocalLoopProxy(unittest.TestCase):
+    """The proxy must isolate ``lark_oapi.ws.client.loop`` per worker thread.
+
+    Regression guard for the multiplex bug where the second feishu adapter
+    overwrote the SDK module global, breaking the first adapter's receive
+    loop with ``Task ... attached to a different loop``.
+    """
+
+    def test_attribute_access_routes_to_calling_threads_loop(self):
+        from plugins.platforms.feishu.adapter import _ThreadLocalLoopProxy
+
+        proxy = _ThreadLocalLoopProxy()
+        loop_a = SimpleNamespace(is_closed=lambda: False, marker="A")
+        loop_b = SimpleNamespace(is_closed=lambda: False, marker="B")
+
+        results = {}
+
+        def worker(marker, loop):
+            proxy.set_thread_loop(loop)
+            time.sleep(0.05)
+            results[marker] = proxy.marker
+
+        t_a = threading.Thread(target=worker, args=("a", loop_a))
+        t_b = threading.Thread(target=worker, args=("b", loop_b))
+        t_a.start()
+        t_b.start()
+        t_a.join()
+        t_b.join()
+
+        self.assertEqual(results["a"], "A")
+        self.assertEqual(results["b"], "B")
+
+    def test_access_before_registration_raises_runtime_error(self):
+        from plugins.platforms.feishu.adapter import _ThreadLocalLoopProxy
+
+        proxy = _ThreadLocalLoopProxy()
+        with self.assertRaises(RuntimeError):
+            proxy.run_until_complete(asyncio.sleep(0))
+
+    def test_install_replaces_module_global_idempotently(self):
+        import sys
+        from plugins.platforms.feishu.adapter import (
+            _ThreadLocalLoopProxy,
+            _install_thread_local_ws_loop_proxy,
+        )
+
+        fake_client_module = ModuleType("lark_oapi.ws.client")
+        fake_client_module.loop = asyncio.new_event_loop()
+        fake_ws_module = ModuleType("lark_oapi.ws")
+        fake_ws_module.client = fake_client_module
+        fake_root_module = ModuleType("lark_oapi")
+        fake_root_module.ws = fake_ws_module
+
+        original_modules = sys.modules.copy()
+        sys.modules["lark_oapi"] = fake_root_module
+        sys.modules["lark_oapi.ws"] = fake_ws_module
+        sys.modules["lark_oapi.ws.client"] = fake_client_module
+        try:
+            _install_thread_local_ws_loop_proxy()
+            first = fake_client_module.loop
+            self.assertIsInstance(first, _ThreadLocalLoopProxy)
+
+            _install_thread_local_ws_loop_proxy()
+            self.assertIs(fake_client_module.loop, first)
+        finally:
+            sys.modules.clear()
+            sys.modules.update(original_modules)
 
 
 def _admits_group(adapter, message, sender_id, chat_id=""):
