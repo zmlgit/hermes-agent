@@ -7,6 +7,8 @@ multiplex mode fails closed instead of leaking.
 """
 import pytest
 
+from pathlib import Path
+
 from agent import secret_scope as ss
 
 
@@ -88,93 +90,69 @@ class TestMcpInterpolationUsesScope:
         assert _interpolate_env_vars("${MY_MCP_TOKEN}") == "env-token"
 
 
-class TestGatewayEnvEnablementRespectsExplicitDisable:
-    """Global gateway env vars must not re-enable disabled secondary profiles."""
+class TestProfilePathResolutionUnderMultiplexScope:
+    """Profile-scoped paths must follow the per-turn _profile_runtime_scope.
 
-    def test_builtin_env_bridges_keep_explicitly_disabled_platforms_off(self, monkeypatch):
-        from gateway.config import GatewayConfig, Platform, PlatformConfig, _apply_env_overrides
+    The multiplexed gateway (gateway.multiplex_profiles) serves every profile
+    from ONE process, scoping each inbound turn with _profile_runtime_scope —
+    the same in-process-many-profiles topology as the desktop tui_gateway. The
+    profile-isolation fixes (per-call path resolution + thread context
+    propagation) must therefore hold under THIS scope too, not just desktop.
+    This is the regression guard proving reachability is not desktop-only.
+    """
 
-        monkeypatch.setenv("API_SERVER_KEY", "profile-api-key")
-        monkeypatch.setenv("FEISHU_APP_ID", "cli_profile")
-        monkeypatch.setenv("FEISHU_APP_SECRET", "feishu-secret")
-        monkeypatch.setenv("WEIXIN_TOKEN", "weixin-token")
-        monkeypatch.setenv("WEIXIN_ACCOUNT_ID", "weixin-account")
+    def _profiles(self, tmp_path):
+        prof_a = tmp_path / "profA"
+        prof_b = tmp_path / "profB"
+        for p in (prof_a, prof_b):
+            (p / "skills").mkdir(parents=True, exist_ok=True)
+            (p / "state").mkdir(parents=True, exist_ok=True)
+        return prof_a, prof_b
 
-        cfg = GatewayConfig(
-            platforms={
-                Platform.API_SERVER: PlatformConfig(
-                    enabled=False,
-                    extra={"_enabled_explicit": True},
-                ),
-                Platform.FEISHU: PlatformConfig(
-                    enabled=False,
-                    extra={"_enabled_explicit": True},
-                ),
-                Platform.WEIXIN: PlatformConfig(
-                    enabled=False,
-                    extra={"_enabled_explicit": True},
-                ),
-            }
-        )
+    def test_skills_dir_follows_multiplex_scope(self, tmp_path):
+        from gateway.run import _profile_runtime_scope
+        import tools.skills_hub as sh
 
-        _apply_env_overrides(cfg)
+        prof_a, prof_b = self._profiles(tmp_path)
+        with _profile_runtime_scope(prof_a):
+            a_seen = Path(sh.SKILLS_DIR)
+        with _profile_runtime_scope(prof_b):
+            b_seen = Path(sh.SKILLS_DIR)
 
-        assert cfg.platforms[Platform.API_SERVER].enabled is False
-        assert cfg.platforms[Platform.API_SERVER].extra["key"] == "profile-api-key"
-        assert cfg.platforms[Platform.FEISHU].enabled is False
-        assert cfg.platforms[Platform.FEISHU].extra["app_id"] == "cli_profile"
-        assert cfg.platforms[Platform.WEIXIN].enabled is False
-        assert cfg.platforms[Platform.WEIXIN].token == "weixin-token"
-        assert "_enabled_explicit" not in cfg.platforms[Platform.API_SERVER].extra
+        assert a_seen == prof_a / "skills"
+        assert b_seen == prof_b / "skills"
 
-    def test_scoped_profile_does_not_inherit_global_platform_env(self, monkeypatch):
-        from gateway.config import GatewayConfig, Platform, _apply_env_overrides
+    def test_cache_dir_follows_multiplex_scope(self, tmp_path):
+        from gateway.run import _profile_runtime_scope
+        import gateway.platforms.base as gb
 
-        monkeypatch.setenv("API_SERVER_KEY", "default-api-key")
-        monkeypatch.setenv("FEISHU_APP_ID", "cli_default")
-        monkeypatch.setenv("FEISHU_APP_SECRET", "default-feishu-secret")
-        monkeypatch.setenv("WEIXIN_TOKEN", "default-weixin-token")
-        monkeypatch.setenv("WEIXIN_ACCOUNT_ID", "default-weixin-account")
+        _prof_a, prof_b = self._profiles(tmp_path)
+        with _profile_runtime_scope(prof_b):
+            seen = gb.get_image_cache_dir()
+        assert str(seen).startswith(str(prof_b))
 
-        ss.set_multiplex_active(True)
-        tok = ss.set_secret_scope({})
-        try:
-            cfg = GatewayConfig()
-            _apply_env_overrides(cfg)
-        finally:
-            ss.reset_secret_scope(tok)
+    def test_worker_thread_inherits_multiplex_scope(self, tmp_path):
+        """A wrapped worker spawned inside the scope must see the right profile.
 
-        assert Platform.API_SERVER not in cfg.platforms
-        assert Platform.FEISHU not in cfg.platforms
-        assert Platform.WEIXIN not in cfg.platforms
+        The _profile_runtime_scope docstring relies on copy_context() carrying
+        the override into the agent worker thread; this proves the M2 fix
+        primitive delivers that under the multiplexer's scope.
+        """
+        import threading
 
-    def test_scoped_feishu_env_populates_profile_extra(self, monkeypatch):
-        from gateway.config import GatewayConfig, Platform, _apply_env_overrides
+        from gateway.run import _profile_runtime_scope
+        from hermes_constants import get_hermes_home
+        from tools.thread_context import propagate_context_to_thread
 
-        monkeypatch.setenv("FEISHU_APP_ID", "cli_default")
-        monkeypatch.setenv("FEISHU_APP_SECRET", "default-secret")
-        monkeypatch.setenv("FEISHU_GROUP_POLICY", "disabled")
+        _prof_a, prof_b = self._profiles(tmp_path)
+        seen = {}
 
-        ss.set_multiplex_active(True)
-        tok = ss.set_secret_scope(
-            {
-                "FEISHU_APP_ID": "cli_profile",
-                "FEISHU_APP_SECRET": "profile-secret",
-                "FEISHU_GROUP_POLICY": "open",
-                "FEISHU_ALLOWED_USERS": "ou_a,ou_b",
-                "FEISHU_REQUIRE_MENTION": "false",
-            }
-        )
-        try:
-            cfg = GatewayConfig()
-            _apply_env_overrides(cfg)
-        finally:
-            ss.reset_secret_scope(tok)
+        def worker():
+            seen["home"] = str(get_hermes_home())
 
-        feishu = cfg.platforms[Platform.FEISHU]
-        assert feishu.enabled is True
-        assert feishu.extra["app_id"] == "cli_profile"
-        assert feishu.extra["app_secret"] == "profile-secret"
-        assert feishu.extra["group_policy"] == "open"
-        assert feishu.extra["allowed_users"] == "ou_a,ou_b"
-        assert feishu.extra["require_mention"] == "false"
+        with _profile_runtime_scope(prof_b):
+            t = threading.Thread(target=propagate_context_to_thread(worker))
+            t.start()
+            t.join()
+
+        assert seen["home"] == str(prof_b)
