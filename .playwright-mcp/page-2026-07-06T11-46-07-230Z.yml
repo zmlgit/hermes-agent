@@ -1,0 +1,169 @@
+- generic [active] [ref=f1e1]:
+  - banner [ref=f1e2]:
+    - generic [ref=f1e4]:
+      - link "河北省丝网产品质量监督检验中心" [ref=f1e6] [cursor=pointer]:
+        - /url: /html/web/
+        - img "河北省丝网产品质量监督检验中心" [ref=f1e7]
+      - generic [ref=f1e8]:
+        - generic [ref=f1e9]:
+          - img "联系电话" [ref=f1e10]
+          - generic [ref=f1e11]: 0318-7533315
+        - generic [ref=f1e12]:
+          - text: 科学
+          - emphasis [ref=f1e13]: 公正
+          - text: 廉洁
+          - emphasis [ref=f1e14]: 高效
+    - navigation "主导航" [ref=f1e17]:
+      - list [ref=f1e18]:
+        - listitem [ref=f1e19]:
+          - link "首页" [ref=f1e20] [cursor=pointer]:
+            - /url: /html/web/
+        - listitem [ref=f1e21]:
+          - link "关于我们" [ref=f1e22] [cursor=pointer]:
+            - /url: /html/web/cat_about/index.html
+        - listitem [ref=f1e23]:
+          - link "检定项目" [ref=f1e24] [cursor=pointer]:
+            - /url: /html/web/cat_check/index.html
+        - listitem [ref=f1e25]:
+          - link "检测设备" [ref=f1e26] [cursor=pointer]:
+            - /url: /html/web/cat_equip/index.html
+        - listitem [ref=f1e27]:
+          - link "政策法规" [ref=f1e28] [cursor=pointer]:
+            - /url: /html/web/cat_policy/index.html
+        - listitem [ref=f1e29]:
+          - link "在线委托" [ref=f1e30] [cursor=pointer]:
+            - /url: /html/web/cat_entrust/index.html
+        - listitem [ref=f1e31]:
+          - link "资讯中心" [ref=f1e32] [cursor=pointer]:
+            - /url: /html/web/cat_news/index.html
+        - listitem [ref=f1e33]:
+          - link "联系我们" [ref=f1e34] [cursor=pointer]:
+            - /url: /html/web/cat_contact/index.html
+  - generic [ref=f1e36]:
+    - heading "资讯中心" [level=1] [ref=f1e37]
+    - generic [ref=f1e38]: 质检资讯、行业资讯、通知公告
+  - generic [ref=f1e40]:
+    - link "首页" [ref=f1e41] [cursor=pointer]:
+      - /url: /html/web/
+    - text: / 资讯中心
+  - generic [ref=f1e43]:
+    - generic [ref=f1e44]:
+      - generic [ref=f1e45]:
+        - generic [ref=f1e46]: 质检资讯
+        - link "查看更多 " [ref=f1e47] [cursor=pointer]:
+          - /url: /html/web/cat_news_quality/index.html
+          - text: 查看更多
+          - generic [ref=f1e48]: 
+      - list [ref=f1e49]:
+        - listitem [ref=f1e50]:
+          - link "县领导就第三次经济普查工作进行督查" [ref=f1e51] [cursor=pointer]:
+            - /url: /html/web/cat_news_quality/178300975004267895.html
+          - generic [ref=f1e52]: 2026-07-03
+        - listitem [ref=f1e53]:
+          - link "用故事讲述计量的精髓-正午的炮声" [ref=f1e54] [cursor=pointer]:
+            - /url: /html/web/cat_news_quality/178300975027020016.html
+          - generic [ref=f1e55]: 2026-07-03
+        - listitem [ref=f1e56]:
+          - link "【计量】改革开放40年，计量发展始终与国家振兴的脉搏共跳动！" [ref=f1e57] [cursor=pointer]:
+            - /url: /html/web/cat_news_quality/178300975029056145.html
+          - generic [ref=f1e58]: 2026-07-03
+        - listitem [ref=f1e59]:
+          - link "安平县食品和市场监督管理局在全县范围内组织开展眼镜店在用计量器具专项计量检查" [ref=f1e60] [cursor=pointer]:
+            - /url: /html/web/cat_news_quality/178300974960379020.html
+          - generic [ref=f1e61]: 2026-07-03
+        - listitem [ref=f1e62]:
+          - link "安平县开展秋冬季造林绿化拉练" [ref=f1e63] [cursor=pointer]:
+            - /url: /html/web/cat_news_quality/178300974978871483.html
+          - generic [ref=f1e64]: 2026-07-03
+    - generic [ref=f1e65]:
+      - generic [ref=f1e66]:
+        - generic [ref=f1e67]: 行业资讯
+        - link "查看更多 " [ref=f1e68] [cursor=pointer]:
+          - /url: /html/web/cat_news_industry/index.html
+          - text: 查看更多
+          - generic [ref=f1e69]: 
+      - list [ref=f1e70]:
+        - listitem [ref=f1e71]:
+          - link "安平县质监局召开教育实践活动民主生活会" [ref=f1e72] [cursor=pointer]:
+            - /url: /html/web/cat_news_industry/178300975041846328.html
+          - generic [ref=f1e73]: 2026-07-03
+        - listitem [ref=f1e74]:
+          - link "安平工商联联合质监局组织丝网企业分析“夺命护栏”事件" [ref=f1e75] [cursor=pointer]:
+            - /url: /html/web/cat_news_industry/178300974956655292.html
+          - generic [ref=f1e76]: 2026-07-03
+        - listitem [ref=f1e77]:
+          - link "安平县质监局召开教育实践活动民主座谈会" [ref=f1e78] [cursor=pointer]:
+            - /url: /html/web/cat_news_industry/178300974962225534.html
+          - generic [ref=f1e79]: 2026-07-03
+        - listitem [ref=f1e80]:
+          - link "政协安平县召开第八届第八次常委会议" [ref=f1e81] [cursor=pointer]:
+            - /url: /html/web/cat_news_industry/178300974969842674.html
+          - generic [ref=f1e82]: 2026-07-03
+        - listitem [ref=f1e83]:
+          - link "武邑县质监局深入重点企业进行指导帮扶" [ref=f1e84] [cursor=pointer]:
+            - /url: /html/web/cat_news_industry/178300974986094319.html
+          - generic [ref=f1e85]: 2026-07-03
+    - generic [ref=f1e86]:
+      - generic [ref=f1e87]:
+        - generic [ref=f1e88]: 通知公告
+        - link "查看更多 " [ref=f1e89] [cursor=pointer]:
+          - /url: /html/web/cat_news_notice/index.html
+          - text: 查看更多
+          - generic [ref=f1e90]: 
+      - list [ref=f1e91]:
+        - listitem [ref=f1e92]:
+          - link "公正性声明" [ref=f1e93] [cursor=pointer]:
+            - /url: /html/web/cat_news_notice/178300975000527559.html
+          - generic [ref=f1e94]: 2026-07-03
+        - listitem [ref=f1e95]:
+          - link "单位名称变更声明" [ref=f1e96] [cursor=pointer]:
+            - /url: /html/web/cat_news_notice/178300975011964444.html
+          - generic [ref=f1e97]: 2026-07-03
+        - listitem [ref=f1e98]:
+          - link "市质监局窗口实现组织机构代码业务即来即办" [ref=f1e99] [cursor=pointer]:
+            - /url: /html/web/cat_news_notice/178300975023315343.html
+          - generic [ref=f1e100]: 2026-07-03
+        - listitem [ref=f1e101]:
+          - link "市质监局行政事业性收费项目统计表" [ref=f1e102] [cursor=pointer]:
+            - /url: /html/web/cat_news_notice/178300974976891840.html
+          - generic [ref=f1e103]: 2026-07-03
+        - listitem [ref=f1e104]:
+          - link "河北省丝网产品质量监督检验站质检承诺" [ref=f1e105] [cursor=pointer]:
+            - /url: /html/web/cat_news_notice/178300974984321429.html
+          - generic [ref=f1e106]: 2026-07-03
+  - generic [ref=f1e108]:
+    - link "首页" [ref=f1e109] [cursor=pointer]:
+      - /url: /html/web/
+    - link "综检中心简介" [ref=f1e110] [cursor=pointer]:
+      - /url: /html/web/cat_about_js/index.html
+    - link "综检中心检测设备" [ref=f1e111] [cursor=pointer]:
+      - /url: /html/web/cat_equip/index.html
+    - link "综检中心人员" [ref=f1e112] [cursor=pointer]:
+      - /url: /html/web/cat_about_td/index.html
+    - link "综检中心资质" [ref=f1e113] [cursor=pointer]:
+      - /url: /html/web/cat_about_zz/index.html
+    - link "综检中心资讯" [ref=f1e114] [cursor=pointer]:
+      - /url: /html/web/cat_news_quality/index.html
+    - link "政策法规" [ref=f1e115] [cursor=pointer]:
+      - /url: /html/web/cat_policy/index.html
+    - link "联系我们" [ref=f1e116] [cursor=pointer]:
+      - /url: /html/web/cat_contact/index.html
+  - contentinfo [ref=f1e117]:
+    - generic [ref=f1e118]:
+      - generic [ref=f1e119]:
+        - generic [ref=f1e120]: 主办单位：河北省丝网产品安平县综合检验检测中心
+        - generic [ref=f1e121]: 地址：安平县正港路南经五路东59-1号 联系电话：0318-7533315
+        - generic [ref=f1e122]:
+          - text: 邮编：053600 邮箱：
+          - link "sw12365@126.com" [ref=f1e123] [cursor=pointer]:
+            - /url: mailto:sw12365@126.com
+        - generic [ref=f1e124]:
+          - text: 技术支持：[
+          - link "融创传媒" [ref=f1e125] [cursor=pointer]:
+            - /url: http://rongchuangmedia.net/
+          - text: "]"
+          - link "冀ICP备13023258号" [ref=f1e126] [cursor=pointer]:
+            - /url: https://beian.miit.gov.cn/
+      - generic [ref=f1e127]:
+        - img "安平县综合检验检测中心公众号" [ref=f1e128]
+        - generic [ref=f1e129]: 安平县综合检验检测中心公众号

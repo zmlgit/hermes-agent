@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Bot Avatars — 统一肖像</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #f0f2f5; font-family: -apple-system, 'Segoe UI', sans-serif; padding: 40px; }
+h1 { text-align: center; margin-bottom: 10px; color: #1a1a2e; font-size: 28px; }
+h2 { text-align: center; margin-bottom: 30px; color: #666; font-weight: 400; font-size: 16px; }
+.grid { display: flex; flex-wrap: wrap; gap: 30px; justify-content: center; max-width: 1200px; margin: 0 auto; }
+.card { background: white; border-radius: 16px; padding: 24px 24px 20px; text-align: center;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.08); width: 200px; transition: transform 0.2s; }
+.card:hover { transform: translateY(-4px); box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
+.card svg { display: block; margin: 0 auto 12px; border-radius: 50%; background: #f8f9fa; }
+.card .name { font-weight: 600; font-size: 16px; color: #1a1a2e; margin-bottom: 4px; }
+.card .role { font-size: 13px; color: #888; }
+.card .old-name { font-size: 12px; color: #aaa; margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>🤖 机械军团 · 统一肖像</h1>
+<h2>右键 → 另存为 SVG，在飞书开放平台作为应用头像上传</h2>
+<div class="grid" id="grid"></div>
+
+<script>
+const bots = [
+  {
+    name: "Jensen", role: "CEO · 总协调",
+    oldName: "Cook → Musk → Jensen",
+    // Visionary leader with swept-back hair
+    svg: (s) => createPortrait(s, "#E8D5B7", "#2C2C2C", "#1a1a2e", "M 70,65 Q 70,85 85,85 Q 100,85 100,65", "M 55,62 Q 50,55 58,52 Q 62,50 65,55", "M 115,62 Q 120,55 112,52 Q 108,50 105,55", "#D4A574", "#2C2C2C", [
+      {type:"round", cx:70, cy:58, r:4}, {type:"round", cx:100, cy:58, r:4}
+    ])
+  },
+  {
+    name: "Jobs", role: "PM · 产品经理",
+    oldName: "Jobs",
+    // Smart, analytical with glasses
+    svg: (s) => createPortrait(s, "#F0E6D3", "#3D3D3D", "#2d3436", "M 72,68 Q 72,88 85,88 Q 98,88 98,68", "M 58,64 Q 52,56 60,54 Q 65,52 68,58", "M 112,64 Q 118,56 110,54 Q 105,52 102,58", "#D4A574", "#3D3D3D", [
+      {type:"round", cx:68, cy:60, r:4}, {type:"round", cx:102, cy:60, r:4}
+    ], true, "#4a90d9", [65,57,105,57])
+  },
+  {
+    name: "Dean", role: "架构师",
+    oldName: "Dean",
+    // Thoughtful architect with grey-streaked hair
+    svg: (s) => createPortrait(s, "#E0D5C5", "#4A4A4A", "#2c3e50", "M 68,70 Q 68,92 85,92 Q 102,92 102,70", "M 55,65 Q 48,57 56,53 Q 60,50 64,56", "M 115,65 Q 122,57 114,53 Q 110,50 106,56", "#C4956A", "#555", [
+      {type:"round", cx:67, cy:62, r:4}, {type:"round", cx:103, cy:62, r:4}
+    ])
+  },
+  {
+    name: "Carmack", role: "全栈开发",
+    oldName: "Carmack",
+    // Energetic coder with youthful style
+    svg: (s) => createPortrait(s, "#F5E6D0", "#222", "#2c3e50", "M 73,63 Q 73,83 85,83 Q 97,83 97,63", "M 60,60 Q 54,52 62,49 Q 66,47 68,53", "M 110,60 Q 116,52 108,49 Q 104,47 102,53", "#E8B88A", "#222", [
+      {type:"round", cx:70, cy:56, r:4}, {type:"round", cx:100, cy:56, r:4}
+    ])
+  },
+  {
+    name: "Stonebraker", role: "DBA · 数据库",
+    oldName: "Stonebraker",
+    // Wise, experienced with beard
+    svg: (s) => createPortrait(s, "#E5D8C0", "#5A5A5A", "#34495e", "M 66,72 Q 66,95 85,95 Q 104,95 104,72", "M 52,67 Q 45,59 53,55 Q 58,52 62,58", "M 118,67 Q 125,59 117,55 Q 112,52 108,58", "#B8895A", "#5A5A5A", [
+      {type:"round", cx:65, cy:63, r:4}, {type:"round", cx:105, cy:63, r:4}
+    ], false, null, null, "M 75,90 Q 85,105 95,90", "#5A5A5A")
+  },
+  {
+    name: "Ive", role: "设计师",
+    oldName: "Ive",
+    // Creative designer with stylish hair
+    svg: (s) => createPortrait(s, "#F2E6D8", "#8B4513", "#6c5ce7", "M 72,60 Q 72,80 85,80 Q 98,80 98,60", "M 62,58 Q 56,50 64,47 Q 68,45 70,51", "M 108,58 Q 114,50 106,47 Q 102,45 100,51", "#D4A574", "#8B4513", [
+      {type:"round", cx:72, cy:54, r:4}, {type:"round", cx:98, cy:54, r:4}
+    ])
+  },
+  {
+    name: "Beck", role: "QA · 测试",
+    oldName: "Beck",
+    // Precise, detail-oriented tester
+    svg: (s) => createPortrait(s, "#ECDEC8", "#383838", "#e17055", "M 70,66 Q 70,86 85,86 Q 100,86 100,66", "M 57,62 Q 51,54 59,51 Q 63,49 66,55", "M 113,62 Q 119,54 111,51 Q 107,49 104,55", "#D4A574", "#383838", [
+      {type:"round", cx:69, cy:58, r:4}, {type:"round", cx:101, cy:58, r:4}
+    ])
+  },
+  {
+    name: "Vogels", role: "DevOps · 交付",
+    oldName: "Vogels",
+    // Efficient shipper with short practical hair
+    svg: (s) => createPortrait(s, "#EADCC6", "#2E2E2E", "#00b894", "M 68,68 Q 68,90 85,90 Q 102,90 102,68", "M 54,64 Q 47,56 55,52 Q 60,50 64,56", "M 116,64 Q 123,56 115,52 Q 110,50 106,56", "#C4956A", "#2E2E2E", [
+      {type:"round", cx:66, cy:60, r:4}, {type:"round", cx:104, cy:60, r:4}
+    ])
+  },
+  {
+    name: "Hamilton", role: "代码审查",
+    oldName: "Hamilton",
+    // Meticulous reviewer with thoughtful expression
+    svg: (s) => createPortrait(s, "#E8DCC5", "#3C3C3C", "#6c5ce7", "M 71,67 Q 71,89 85,89 Q 99,89 99,67", "M 58,63 Q 52,55 60,51 Q 65,49 67,56", "M 112,63 Q 118,55 110,51 Q 105,49 103,56", "#D4A574", "#3C3C3C", [
+      {type:"round", cx:70, cy:60, r:4}, {type:"round", cx:100, cy:60, r:4}
+    ], true, "#e17055", [68,57,102,57])
+  },
+  {
+    name: "机械军团-DBA", role: "DBA · 自动化",
+    oldName: "机械军团-DBA",
+    // Mechanical/cyborg stylized DBA
+    svg: (s) => createPortrait(s, "#D8D0C0", "#1A1A2E", "#00cec9", "M 70,65 Q 70,85 85,85 Q 100,85 100,65", "M 58,60 Q 52,52 60,50 Q 64,48 66,54", "M 112,60 Q 118,52 110,50 Q 106,48 104,54", "#B0A080", "#1A1A2E", [
+      {type:"round", cx:70, cy:56, r:4}, {type:"round", cx:100, cy:56, r:4}
+    ], false, null, null, null, null, true)
+  }
+];
+
+function createPortrait(s, skin, hair, accent, faceShape, leftBrow, rightBrow, lipColor, hairColor, eyes, hasGlasses, glassColor, glassLine, beard, beardColor, isCyborg) {
+  const w = 140, h = 140;
+  const cx = 70, cy = 70;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 140" width="200" height="200">\n`;
+  
+  // Background circle
+  svg += `  <circle cx="${cx}" cy="${cy}" r="68" fill="#f0f2f5"/>\n`;
+  
+  // Accent ring + role color dot
+  svg += `  <circle cx="${cx}" cy="${cy}" r="66" fill="none" stroke="${accent}" stroke-width="1.5" opacity="0.3"/>\n`;
+  svg += `  <circle cx="${cx}" cy="${cy - 50}" r="6" fill="${accent}" opacity="0.6"/>\n`;
+  
+  // Neck
+  svg += `  <rect x="65" y="90" width="40" height="25" rx="8" fill="${skin}" opacity="0.6"/>\n`;
+  
+  // Collar / shirt
+  svg += `  <path d="M 45,115 L 55,95 L 85,95 L 95,115 Z" fill="#e0e0e0" opacity="0.5"/>\n`;
+  svg += `  <path d="M 60,95 L 70,105 L 80,95" fill="none" stroke="${accent}" stroke-width="1" opacity="0.4"/>\n`;
+  
+  // Hair (cyborg gets a circuit pattern)
+  if (isCyborg) {
+    svg += `  <path d="M 42,68 Q 40,35 55,28 Q 70,22 85,28 Q 100,35 98,68" fill="${hair}" opacity="0.9"/>\n`;
+    svg += `  <path d="M 48,50 L 60,50 M 50,55 L 65,55 M 80,55 L 92,55 M 75,50 L 85,50" stroke="${accent}" stroke-width="1.5" fill="none" opacity="0.6"/>\n`;
+    svg += `  <circle cx="55" cy="50" r="3" fill="${accent}" opacity="0.8"/>\n`;
+    svg += `  <circle cx="85" cy="50" r="3" fill="${accent}" opacity="0.8"/>\n`;
+  } else {
+    svg += `  <path d="M 42,68 Q 40,35 55,28 Q 70,22 85,28 Q 100,35 98,68" fill="${hair}" opacity="0.85"/>\n`;
+    // Hair detail
+    svg += `  <path d="M 45,60 Q 50,30 70,26 Q 90,30 95,60" fill="none" stroke="${hairColor}" stroke-width="0.8" opacity="0.3"/>\n`;
+  }
+  
+  // Ears
+  svg += `  <ellipse cx="44" cy="70" rx="5" ry="8" fill="${skin}" stroke="${skin}" stroke-width="1"/>\n`;
+  svg += `  <ellipse cx="96" cy="70" rx="5" ry="8" fill="${skin}" stroke="${skin}" stroke-width="1"/>\n`;
+  
+  // Face
+  const [fx1, fy1, fx2, fy2] = faceShape.split(",").map(Number);
+  svg += `  <path d="M ${fx1},${fy1} Q ${fx1},${fy2} ${cx},${fy2} Q ${fx2},${fy2} ${fx2},${fy1}" fill="${skin}" opacity="0.95"/>\n`;
+  
+  // Eyebrows
+  svg += `  <path d="${leftBrow}" fill="none" stroke="${hairColor}" stroke-width="2.5" stroke-linecap="round"/>\n`;
+  svg += `  <path d="${rightBrow}" fill="none" stroke="${hairColor}" stroke-width="2.5" stroke-linecap="round"/>\n`;
+  
+  // Eyes
+  for (const eye of eyes) {
+    svg += `  <circle cx="${eye.cx}" cy="${eye.cy}" r="${eye.r}" fill="#2d3436"/>\n`;
+    if (eye.type === "round") {
+      svg += `  <circle cx="${eye.cx - 1.5}" cy="${eye.cy - 1.5}" r="1.5" fill="white" opacity="0.7"/>\n`;
+    }
+  }
+  
+  // Nose
+  svg += `  <path d="M ${cx},62 L ${cx - 2},70 L ${cx + 2},70 Z" fill="${skin}" stroke="#c8b8a0" stroke-width="0.8"/>\n`;
+  svg += `  <path d="M ${cx},65 Q ${cx + 4},68 ${cx + 6},66" fill="none" stroke="#c8b8a0" stroke-width="0.8"/>\n`;
+  svg += `  <path d="M ${cx},65 Q ${cx - 4},68 ${cx - 6},66" fill="none" stroke="#c8b8a0" stroke-width="0.8"/>\n`;
+  
+  // Lips
+  svg += `  <path d="M ${cx - 8},76 Q ${cx},80 ${cx + 8},76" fill="none" stroke="${lipColor}" stroke-width="1.8" stroke-linecap="round"/>\n`;
+  
+  // Glasses (for Jobs and Hamilton)
+  if (hasGlasses) {
+    svg += `  <circle cx="68" cy="60" r="12" fill="none" stroke="${glassColor}" stroke-width="1.8" opacity="0.7"/>\n`;
+    svg += `  <circle cx="102" cy="60" r="12" fill="none" stroke="${glassColor}" stroke-width="1.8" opacity="0.7"/>\n`;
+    svg += `  <line x1="80" y1="60" x2="90" y2="60" stroke="${glassColor}" stroke-width="1.8" opacity="0.7"/>\n`;
+  }
+  
+  // Beard (for Stonebraker)
+  if (beard) {
+    const [bx1, by1, bx2, by2, bx3, by3] = beard.split(",").map(Number);
+    svg += `  <path d="M ${bx1},${by1} Q ${bx2},${by2} ${bx3},${by3}" fill="none" stroke="${beardColor}" stroke-width="2" opacity="0.5"/>\n`;
+    svg += `  <path d="M 72,82 Q 75,95 85,96 Q 95,95 98,82" fill="none" stroke="${beardColor}" stroke-width="1.5" opacity="0.3"/>\n`;
+    svg += `  <path d="M 70,84 Q 85,100 100,84" fill="none" stroke="${beardColor}" stroke-width="1" opacity="0.2"/>\n`;
+  }
+  
+  // Highlight
+  svg += `  <ellipse cx="50" cy="45" rx="20" ry="10" fill="white" opacity="0.06" transform="rotate(-20,50,45)"/>\n`;
+  
+  svg += `</svg>`;
+  return svg;
+}
+
+const grid = document.getElementById('grid');
+bots.forEach((bot, i) => {
+  const card = document.createElement('div');
+  card.className = 'card';
+  const svgContent = bot.svg(1);
+  card.innerHTML = `${svgContent}<div class="name">${bot.name}</div><div class="role">${bot.role}</div><div class="old-name">曾用名: ${bot.oldName}</div>`;
+  // Add download button
+  const btn = document.createElement('button');
+  btn.textContent = '下载 SVG';
+  btn.style.cssText = 'margin-top:10px;padding:4px 12px;border:1px solid #ddd;border-radius:6px;background:white;cursor:pointer;font-size:12px;';
+  btn.onclick = () => {
+    const blob = new Blob([svgContent], {type: 'image/svg+xml;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${bot.name}-avatar.svg`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  card.appendChild(btn);
+  grid.appendChild(card);
+});
+</script>
+</body>
+</html>

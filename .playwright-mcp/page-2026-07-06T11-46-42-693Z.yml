@@ -1,0 +1,668 @@
+- generic [active] [ref=f3e1]:
+  - generic [ref=f3e2]:
+    - generic [ref=f3e5]:
+      - link "河北省丝网产品质量监督检验中心" [ref=f3e13] [cursor=pointer]:
+        - /url: /index.html
+        - img "河北省丝网产品质量监督检验中心" [ref=f3e14]
+      - generic [ref=f3e16]:
+        - generic [ref=f3e20]:
+          - img "phone" [ref=f3e21]
+          - text: 0318-7533315
+        - generic [ref=f3e28]: 科学 公正 廉洁 高效
+    - generic [ref=f3e35]:
+      - link:
+        - /url: javascript:;
+      - list [ref=f3e36]:
+        - listitem [ref=f3e37]:
+          - link "首页" [ref=f3e38] [cursor=pointer]:
+            - /url: /
+            - text: 首页
+        - listitem [ref=f3e39]:
+          - link "关于我们" [ref=f3e40] [cursor=pointer]:
+            - /url: javascript:;
+            - text: 关于我们
+          - list [ref=f3e41]:
+            - listitem [ref=f3e42]:
+              - link "机构简介" [ref=f3e43] [cursor=pointer]:
+                - /url: javascript:;
+                - text: 机构简介
+              - list [ref=f3e44]:
+                - listitem [ref=f3e45]:
+                  - link "质检所简介" [ref=f3e46] [cursor=pointer]:
+                    - /url: /zhijiansuojianjie.html
+                - listitem [ref=f3e47]:
+                  - link "检验中心简介" [ref=f3e48] [cursor=pointer]:
+                    - /url: /zhijianzhongxinjianjie.html
+            - listitem [ref=f3e49]:
+              - link "资质荣誉" [ref=f3e50] [cursor=pointer]:
+                - /url: javascript:;
+                - text: 资质荣誉
+              - list [ref=f3e51]:
+                - listitem [ref=f3e52]:
+                  - link "检验中心资质" [ref=f3e53] [cursor=pointer]:
+                    - /url: /zhijianzhongxinzizhi.html
+                - listitem [ref=f3e54]:
+                  - link "综检中心资质" [ref=f3e55] [cursor=pointer]:
+                    - /url: /zhijiansuozizhi.html
+            - listitem [ref=f3e56]:
+              - link "能力验证" [ref=f3e57] [cursor=pointer]:
+                - /url: /nengliyanzheng.html
+                - text: 能力验证
+            - listitem [ref=f3e58]:
+              - link "技术团队" [ref=f3e59] [cursor=pointer]:
+                - /url: javascript:;
+                - text: 技术团队
+              - list [ref=f3e60]:
+                - listitem [ref=f3e61]:
+                  - link "综检中心人员" [ref=f3e62] [cursor=pointer]:
+                    - /url: /zhijiansuorenyuan.html
+                - listitem [ref=f3e63]:
+                  - link "检验中心人员" [ref=f3e64] [cursor=pointer]:
+                    - /url: /zhijianzhongxinrenyuan.html
+        - listitem [ref=f3e65]:
+          - link "检定项目" [ref=f3e66] [cursor=pointer]:
+            - /url: javascript:;
+            - text: 检定项目
+          - list [ref=f3e67]:
+            - listitem [ref=f3e68]:
+              - link "河北省丝网产品质量监督检验中心" [ref=f3e69] [cursor=pointer]:
+                - /url: /id6216586.html
+                - text: 河北省丝网产品质量监督检验中心
+        - listitem [ref=f3e70]:
+          - link "检测设备" [ref=f3e71] [cursor=pointer]:
+            - /url: javascript:;
+            - text: 检测设备
+          - list [ref=f3e72]:
+            - listitem [ref=f3e73]:
+              - link "检验中心检测设备" [ref=f3e74] [cursor=pointer]:
+                - /url: /zhijianzhongxinjianceshebei.html
+                - text: 检验中心检测设备
+            - listitem [ref=f3e75]:
+              - link "综检中心检测设备" [ref=f3e76] [cursor=pointer]:
+                - /url: /zhijiansuojianceshebei.html
+                - text: 综检中心检测设备
+        - listitem [ref=f3e77]:
+          - link "政策法规" [ref=f3e78] [cursor=pointer]:
+            - /url: /zhengcefagui.html
+            - text: 政策法规
+        - listitem [ref=f3e79]:
+          - link "在线委托" [ref=f3e80] [cursor=pointer]:
+            - /url: /zaixianweituo.html
+            - text: 在线委托
+        - listitem [ref=f3e81]:
+          - link "资讯中心" [ref=f3e82] [cursor=pointer]:
+            - /url: javascript:;
+            - text: 资讯中心
+          - list [ref=f3e83]:
+            - listitem [ref=f3e84]:
+              - link "质检资讯" [ref=f3e85] [cursor=pointer]:
+                - /url: /zhijianzixun.html
+                - text: 质检资讯
+            - listitem [ref=f3e86]:
+              - link "行业资讯" [ref=f3e87] [cursor=pointer]:
+                - /url: /xingyezixun.html
+                - text: 行业资讯
+        - listitem [ref=f3e88]:
+          - link "联系我们" [ref=f3e89] [cursor=pointer]:
+            - /url: /contactus.html
+            - text: 联系我们
+  - list [ref=f3e91]:
+    - listitem [ref=f3e92]:
+      - generic [ref=f3e94]:
+        - generic [ref=f3e96]:
+          - img [ref=f3e98]
+          - img [ref=f3e101]
+        - link "河北省丝网产品质量监督检验中心" [ref=f3e104] [cursor=pointer]:
+          - /url: /index.html
+          - img "河北省丝网产品质量监督检验中心" [ref=f3e106]
+        - generic [ref=f3e107]:
+          - list [ref=f3e110]:
+            - listitem [ref=f3e111]:
+              - link "首页" [ref=f3e112] [cursor=pointer]:
+                - /url: /
+            - listitem [ref=f3e113]:
+              - generic [ref=f3e114]:
+                - link "关于我们" [ref=f3e115] [cursor=pointer]:
+                  - /url: javascript:;
+                - link [ref=f3e116] [cursor=pointer]:
+                  - /url: javascript:;
+                  - img [ref=f3e117]
+              - list [ref=f3e119]:
+                - listitem [ref=f3e120]:
+                  - generic [ref=f3e121]:
+                    - link "机构简介" [ref=f3e122] [cursor=pointer]:
+                      - /url: javascript:;
+                    - link [ref=f3e123] [cursor=pointer]:
+                      - /url: javascript:;
+                      - img [ref=f3e124]
+                  - list [ref=f3e126]:
+                    - listitem [ref=f3e127]:
+                      - link "质检所简介" [ref=f3e128] [cursor=pointer]:
+                        - /url: /zhijiansuojianjie.html
+                    - listitem [ref=f3e129]:
+                      - link "检验中心简介" [ref=f3e130] [cursor=pointer]:
+                        - /url: /zhijianzhongxinjianjie.html
+                - listitem [ref=f3e131]:
+                  - generic [ref=f3e132]:
+                    - link "资质荣誉" [ref=f3e133] [cursor=pointer]:
+                      - /url: javascript:;
+                    - link [ref=f3e134] [cursor=pointer]:
+                      - /url: javascript:;
+                      - img [ref=f3e135]
+                  - list [ref=f3e137]:
+                    - listitem [ref=f3e138]:
+                      - link "检验中心资质" [ref=f3e139] [cursor=pointer]:
+                        - /url: /zhijianzhongxinzizhi.html
+                    - listitem [ref=f3e140]:
+                      - link "综检中心资质" [ref=f3e141] [cursor=pointer]:
+                        - /url: /zhijiansuozizhi.html
+                - listitem [ref=f3e142]:
+                  - link "能力验证" [ref=f3e143] [cursor=pointer]:
+                    - /url: /nengliyanzheng.html
+                - listitem [ref=f3e144]:
+                  - generic [ref=f3e145]:
+                    - link "技术团队" [ref=f3e146] [cursor=pointer]:
+                      - /url: javascript:;
+                    - link [ref=f3e147] [cursor=pointer]:
+                      - /url: javascript:;
+                      - img [ref=f3e148]
+                  - list [ref=f3e150]:
+                    - listitem [ref=f3e151]:
+                      - link "综检中心人员" [ref=f3e152] [cursor=pointer]:
+                        - /url: /zhijiansuorenyuan.html
+                    - listitem [ref=f3e153]:
+                      - link "检验中心人员" [ref=f3e154] [cursor=pointer]:
+                        - /url: /zhijianzhongxinrenyuan.html
+            - listitem [ref=f3e155]:
+              - generic [ref=f3e156]:
+                - link "检定项目" [ref=f3e157] [cursor=pointer]:
+                  - /url: javascript:;
+                - link [ref=f3e158] [cursor=pointer]:
+                  - /url: javascript:;
+                  - img [ref=f3e159]
+              - list [ref=f3e161]:
+                - listitem [ref=f3e162]:
+                  - link "河北省丝网产品质量监督检验中心" [ref=f3e163] [cursor=pointer]:
+                    - /url: /id6216586.html
+            - listitem [ref=f3e164]:
+              - generic [ref=f3e165]:
+                - link "检测设备" [ref=f3e166] [cursor=pointer]:
+                  - /url: javascript:;
+                - link [ref=f3e167] [cursor=pointer]:
+                  - /url: javascript:;
+                  - img [ref=f3e168]
+              - list [ref=f3e170]:
+                - listitem [ref=f3e171]:
+                  - link "检验中心检测设备" [ref=f3e172] [cursor=pointer]:
+                    - /url: /zhijianzhongxinjianceshebei.html
+                - listitem [ref=f3e173]:
+                  - link "综检中心检测设备" [ref=f3e174] [cursor=pointer]:
+                    - /url: /zhijiansuojianceshebei.html
+            - listitem [ref=f3e175]:
+              - link "政策法规" [ref=f3e176] [cursor=pointer]:
+                - /url: /zhengcefagui.html
+            - listitem [ref=f3e177]:
+              - link "在线委托" [ref=f3e178] [cursor=pointer]:
+                - /url: /zaixianweituo.html
+            - listitem [ref=f3e179]:
+              - generic [ref=f3e180]:
+                - link "资讯中心" [ref=f3e181] [cursor=pointer]:
+                  - /url: javascript:;
+                - link [ref=f3e182] [cursor=pointer]:
+                  - /url: javascript:;
+                  - img [ref=f3e183]
+              - list [ref=f3e185]:
+                - listitem [ref=f3e186]:
+                  - link "质检资讯" [ref=f3e187] [cursor=pointer]:
+                    - /url: /zhijianzixun.html
+                - listitem [ref=f3e188]:
+                  - link "行业资讯" [ref=f3e189] [cursor=pointer]:
+                    - /url: /xingyezixun.html
+            - listitem [ref=f3e190]:
+              - link "联系我们" [ref=f3e191] [cursor=pointer]:
+                - /url: /contactus.html
+          - generic [ref=f3e192]: 科学 公正 廉洁 高效
+          - generic [ref=f3e193]:
+            - img "phone" [ref=f3e194]
+            - text: 0318-7533315
+  - generic [ref=f3e195]:
+    - generic [ref=f3e201]:
+      - generic [ref=f3e202]:
+        - generic [ref=f3e203]:
+          - generic [ref=f3e205]:
+            - generic [ref=f3e208]:
+              - heading "检测信息平台公告" [level=2] [ref=f3e209]
+              - link "更多 »" [ref=f3e210] [cursor=pointer]:
+                - /url: /ic509964.html
+            - list [ref=f3e215]:
+              - listitem [ref=f3e216]:
+                - link "公正性声明" [ref=f3e221] [cursor=pointer]:
+                  - /url: /id40985886.html
+              - listitem [ref=f3e222]:
+                - link "市质监局窗口实现组织机构代码业务即来即办" [ref=f3e227] [cursor=pointer]:
+                  - /url: /id6309096.html
+              - listitem [ref=f3e228]:
+                - link "关于检验报告系统查询问题公告" [ref=f3e233] [cursor=pointer]:
+                  - /url: /id6509096.html
+              - listitem [ref=f3e234]:
+                - link "全国颗粒表征与分检及筛网标准化技术委员会2014年年会将于2014年11月25至26日召开" [ref=f3e239] [cursor=pointer]:
+                  - /url: /id6609096.html
+              - listitem [ref=f3e240]:
+                - link "河北省丝网产品质量监督检验站质检承诺" [ref=f3e245] [cursor=pointer]:
+                  - /url: /id6709096.html
+          - generic [ref=f3e247]:
+            - generic [ref=f3e250]:
+              - heading "安平县综合检验检测中心专区" [level=2] [ref=f3e251]
+              - link "更多 »" [ref=f3e252] [cursor=pointer]:
+                - /url: /ic566764.html
+            - list [ref=f3e257]:
+              - listitem [ref=f3e258]:
+                - generic [ref=f3e259]:
+                  - link "安平县开展秋冬季造林绿化拉练" [ref=f3e263] [cursor=pointer]:
+                    - /url: /id6071686.html
+                  - text: 2018-12-21
+              - listitem [ref=f3e264]:
+                - generic [ref=f3e265]:
+                  - link "县领导就第三次经济普查工作进行督查" [ref=f3e269] [cursor=pointer]:
+                    - /url: /id6471686.html
+                  - text: 2018-12-21
+              - listitem [ref=f3e270]:
+                - generic [ref=f3e271]:
+                  - link "用故事讲述计量的精髓-正午的炮声" [ref=f3e275] [cursor=pointer]:
+                    - /url: /id6362686.html
+                  - text: 2018-12-21
+              - listitem [ref=f3e276]:
+                - generic [ref=f3e277]:
+                  - link "【计量】改革开放40年，计量发展始终与国家振兴的脉搏共跳动！" [ref=f3e281] [cursor=pointer]:
+                    - /url: /id6913686.html
+                  - text: 2018-12-21
+              - listitem [ref=f3e282]:
+                - generic [ref=f3e283]:
+                  - link "安平县食品和市场监督管理局在全县范围内组织开展眼镜店在用计量器具专项计量检查" [ref=f3e287] [cursor=pointer]:
+                    - /url: /id6213686.html
+                  - text: 2018-12-21
+        - generic [ref=f3e294]:
+          - generic [ref=f3e295]:
+            - heading "安平县综合检验检测中心" [level=2] [ref=f3e296]
+            - link "更多 »" [ref=f3e297] [cursor=pointer]:
+              - /url: /id6716586.html
+          - generic [ref=f3e298]:
+            - img "检定项目1" [ref=f3e299]
+            - text: 一般压力表；燃油加油机；血压计（表）；非自行指示秤；数字指示秤；模拟指示秤；外径千分尺；游标卡尺游标高度尺；游标深度尺；膜式燃气表；电能表；以质量（重量）单位标注；商品净含量；以体积单位标注商品净含量；以长度单位标注商品净含量；以面积单位标注商品净含量；以计数标注商品净含量；
+        - generic [ref=f3e305]:
+          - generic [ref=f3e306]:
+            - heading "河北省丝网产品质量监督检验中心检测" [level=2] [ref=f3e307]
+            - link "更多 »" [ref=f3e308] [cursor=pointer]:
+              - /url: /id6216586.html
+          - generic [ref=f3e309]:
+            - img "检定项目3" [ref=f3e310]
+            - text: 石笼网；护栏网；钢筋网；镀锌电焊网；刺绳；边坡防护网；钢格板；振动筛网；围栏网；不锈钢网；钢丝绳；镀锌丝；网格布；土工布；窗纱；钢板网；不锈钢丝；钢筋；
+        - generic [ref=f3e316]:
+          - generic [ref=f3e317]:
+            - heading "安平县综合检验检测中心的煤炭检测" [level=2] [ref=f3e318]
+            - link "更多 »" [ref=f3e319] [cursor=pointer]:
+              - /url: /id6286586.html
+          - generic [ref=f3e320]:
+            - img "检定项目2" [ref=f3e321]
+            - text: 煤中全水分；煤中水分；煤的灰分、煤的挥发分；煤的发热量；煤的冷压强度；煤中全硫；煤的落下强度；煤中碳酸盐二氧化碳含量；煤中碳含量；煤中氢含量；蜂窝煤规格尺寸；蜂窝煤样品质量；煤固硫率；
+        - generic [ref=f3e323]:
+          - generic [ref=f3e325]:
+            - generic [ref=f3e328]:
+              - heading "丝网产品标准专区" [level=2] [ref=f3e329]
+              - link "更多 »" [ref=f3e330] [cursor=pointer]:
+                - /url: /siwangchanpinbiaozhunzhuanqu.html
+            - table [ref=f3e335]:
+              - rowgroup [ref=f3e336]:
+                - row "文件名称 下载" [ref=f3e337]:
+                  - columnheader "文件名称" [ref=f3e338]
+                  - columnheader "下载" [ref=f3e339]
+              - rowgroup [ref=f3e340]:
+                - row "GB_T_6003 .1-2012金属丝编织网试验筛.pdf 下载" [ref=f3e341]:
+                  - cell "GB_T_6003 .1-2012金属丝编织网试验筛.pdf" [ref=f3e342]:
+                    - generic "GB_T_6003 .1-2012金属丝编织网试验筛.pdf" [ref=f3e343]:
+                      - link "GB_T_6003 .1-2012金属丝编织网试验筛.pdf" [ref=f3e344] [cursor=pointer]:
+                        - /url: /phoenix/admin/download?fileId=hApKUfszkIlg&dp=GvUApKfKKUAU
+                  - cell "下载" [ref=f3e345]:
+                    - link "下载" [ref=f3e347] [cursor=pointer]:
+                      - /url: /phoenix/admin/download?fileId=hApKUfszkIlg&dp=GvUApKfKKUAU
+                      - text: 下载
+                - row "GB_T_6003 .2-2012金属穿孔板试验筛.pdf 下载" [ref=f3e348]:
+                  - cell "GB_T_6003 .2-2012金属穿孔板试验筛.pdf" [ref=f3e349]:
+                    - generic "GB_T_6003 .2-2012金属穿孔板试验筛.pdf" [ref=f3e350]:
+                      - link "GB_T_6003 .2-2012金属穿孔板试验筛.pdf" [ref=f3e351] [cursor=pointer]:
+                        - /url: /phoenix/admin/download?fileId=pRpKAUszkScV&dp=GvUApKfKKUAU
+                  - cell "下载" [ref=f3e352]:
+                    - link "下载" [ref=f3e354] [cursor=pointer]:
+                      - /url: /phoenix/admin/download?fileId=pRpKAUszkScV&dp=GvUApKfKKUAU
+                      - text: 下载
+                - row "JB 9155-2000输送用金属丝编织网带.pdf 下载" [ref=f3e355]:
+                  - cell "JB 9155-2000输送用金属丝编织网带.pdf" [ref=f3e356]:
+                    - generic "JB 9155-2000输送用金属丝编织网带.pdf" [ref=f3e357]:
+                      - link "JB 9155-2000输送用金属丝编织网带.pdf" [ref=f3e358] [cursor=pointer]:
+                        - /url: /phoenix/admin/download?fileId=frKUAfiePyWB&dp=GvUApKfKKUAU
+                  - cell "下载" [ref=f3e359]:
+                    - link "下载" [ref=f3e361] [cursor=pointer]:
+                      - /url: /phoenix/admin/download?fileId=frKUAfiePyWB&dp=GvUApKfKKUAU
+                      - text: 下载
+                - row "JB T 9031-1999矿用冲孔筛板.pdf 下载" [ref=f3e362]:
+                  - cell "JB T 9031-1999矿用冲孔筛板.pdf" [ref=f3e363]:
+                    - generic "JB T 9031-1999矿用冲孔筛板.pdf" [ref=f3e364]:
+                      - link "JB T 9031-1999矿用冲孔筛板.pdf" [ref=f3e365] [cursor=pointer]:
+                        - /url: /phoenix/admin/download?fileId=ryAUKfDokInq&dp=GvUApKfKKUAU
+                  - cell "下载" [ref=f3e366]:
+                    - link "下载" [ref=f3e368] [cursor=pointer]:
+                      - /url: /phoenix/admin/download?fileId=ryAUKfDokInq&dp=GvUApKfKKUAU
+                      - text: 下载
+                - row "JB_T_9032-1999矿用金属编织筛网.pdf 下载" [ref=f3e369]:
+                  - cell "JB_T_9032-1999矿用金属编织筛网.pdf" [ref=f3e370]:
+                    - generic "JB_T_9032-1999矿用金属编织筛网.pdf" [ref=f3e371]:
+                      - link "JB_T_9032-1999矿用金属编织筛网.pdf" [ref=f3e372] [cursor=pointer]:
+                        - /url: /phoenix/admin/download?fileId=gUpAfKNeuSkq&dp=GvUApKfKKUAU
+                  - cell "下载" [ref=f3e373]:
+                    - link "下载" [ref=f3e375] [cursor=pointer]:
+                      - /url: /phoenix/admin/download?fileId=gUpAfKNeuSkq&dp=GvUApKfKKUAU
+                      - text: 下载
+          - generic [ref=f3e377]:
+            - generic [ref=f3e380]:
+              - heading "丝网产品知识专区" [level=2] [ref=f3e381]
+              - link "更多 »" [ref=f3e382] [cursor=pointer]:
+                - /url: /ic599964.html
+            - list [ref=f3e387]:
+              - listitem [ref=f3e388]:
+                - generic [ref=f3e389]:
+                  - link "废铜的再生和加工方式" [ref=f3e393] [cursor=pointer]:
+                    - /url: /id6378096.html
+                  - text: 2018-12-17
+              - listitem [ref=f3e394]:
+                - generic [ref=f3e395]:
+                  - link "不锈钢专业名词" [ref=f3e399] [cursor=pointer]:
+                    - /url: /id6478096.html
+                  - text: 2018-12-17
+              - listitem [ref=f3e400]:
+                - generic [ref=f3e401]:
+                  - link "有色金属合金及分类" [ref=f3e405] [cursor=pointer]:
+                    - /url: /id6578096.html
+                  - text: 2018-12-17
+              - listitem [ref=f3e406]:
+                - generic [ref=f3e407]:
+                  - link "铜的市场分布及特点" [ref=f3e411] [cursor=pointer]:
+                    - /url: /id6778096.html
+                  - text: 2018-12-17
+              - listitem [ref=f3e412]:
+                - generic [ref=f3e413]:
+                  - link "常见的几种铁合金及用途" [ref=f3e417] [cursor=pointer]:
+                    - /url: /id6989096.html
+                  - text: 2018-12-17
+              - listitem [ref=f3e418]:
+                - generic [ref=f3e419]:
+                  - link "丝网产品功能用途" [ref=f3e423] [cursor=pointer]:
+                    - /url: /id6189096.html
+                  - text: 2018-12-17
+              - listitem [ref=f3e424]:
+                - generic [ref=f3e425]:
+                  - link "丝网的概念及功能" [ref=f3e429] [cursor=pointer]:
+                    - /url: /id6289096.html
+                  - text: 2018-12-17
+              - listitem [ref=f3e430]:
+                - generic [ref=f3e431]:
+                  - link "什么是特殊钢" [ref=f3e435] [cursor=pointer]:
+                    - /url: /id6389096.html
+                  - text: 2018-12-17
+              - listitem [ref=f3e436]:
+                - generic [ref=f3e437]:
+                  - link "丝网常见的计算方式" [ref=f3e441] [cursor=pointer]:
+                    - /url: /id6489096.html
+                  - text: 2018-12-17
+      - generic [ref=f3e442]:
+        - generic [ref=f3e443]:
+          - generic [ref=f3e445]:
+            - heading "检验报告查询" [level=2] [ref=f3e447]
+            - generic [ref=f3e448]:
+              - generic [ref=f3e452]:
+                - textbox "输入检索内容" [ref=f3e453]
+                - button "热门关键词：" [ref=f3e454]:
+                  - img [ref=f3e455]
+              - generic:
+                - list
+              - generic:
+                - list
+              - img
+          - generic [ref=f3e459]:
+            - text: 可根据
+            - strong [ref=f3e461]: 公司名称
+            - text: 或者
+            - strong [ref=f3e463]: 检测编号
+            - text: 搜索
+        - link "标准下载" [ref=f3e475] [cursor=pointer]:
+          - /url: /dc41991.html
+        - link "收费公示" [ref=f3e484] [cursor=pointer]:
+          - /url: /shoufeigongshi.html
+        - link "送检法规" [ref=f3e493] [cursor=pointer]:
+          - /url: /id6097486.html
+        - link "在线委托" [ref=f3e502] [cursor=pointer]:
+          - /url: /zaixianweituo.html
+        - heading "品牌企业风采" [level=2] [ref=f3e513]
+        - generic [ref=f3e514]:
+          - generic [ref=f3e516]:
+            - generic [ref=f3e521]:
+              - link "安平安华五金网类制品有限公司" [ref=f3e522] [cursor=pointer]:
+                - /url: /id6040686.html
+                - img "安平安华五金网类制品有限公司" [ref=f3e523]
+              - link "安平安华五金网类制品有限公司" [ref=f3e524] [cursor=pointer]:
+                - /url: /id6040686.html
+                - generic [ref=f3e525]: 安平安华五金网类制品有限公司
+            - generic [ref=f3e534]:
+              - link "安平金德隆网业有限公司" [ref=f3e535] [cursor=pointer]:
+                - /url: /id6309686.html
+                - img "安平金德隆网业有限公司" [ref=f3e536]
+              - link "安平金德隆网业有限公司" [ref=f3e537] [cursor=pointer]:
+                - /url: /id6309686.html
+                - generic [ref=f3e538]: 安平金德隆网业有限公司
+            - generic [ref=f3e547]:
+              - link "安平县中泰钢板网业有限公司" [ref=f3e548] [cursor=pointer]:
+                - /url: /id6499686.html
+                - img "安平县中泰钢板网业有限公司" [ref=f3e549]
+              - link "安平县中泰钢板网业有限公司" [ref=f3e550] [cursor=pointer]:
+                - /url: /id6499686.html
+                - generic [ref=f3e551]: 安平县中泰钢板网业有限公司
+            - generic [ref=f3e560]:
+              - link "河北鲸龙汽配有限公司" [ref=f3e561] [cursor=pointer]:
+                - /url: /id6289686.html
+                - img "河北鲸龙汽配有限公司" [ref=f3e562]
+              - link "河北鲸龙汽配有限公司" [ref=f3e563] [cursor=pointer]:
+                - /url: /id6289686.html
+                - generic [ref=f3e564]: 河北鲸龙汽配有限公司
+            - generic [ref=f3e573]:
+              - link "河北骄阳丝网设备有限责任公司" [ref=f3e574] [cursor=pointer]:
+                - /url: /id6478686.html
+                - img "河北骄阳丝网设备有限责任公司" [ref=f3e575]
+              - link "河北骄阳丝网设备有限责任公司" [ref=f3e576] [cursor=pointer]:
+                - /url: /id6478686.html
+                - generic [ref=f3e577]: 河北骄阳丝网设备有限责任公司
+            - generic [ref=f3e586]:
+              - link "河北宇龙传动轴有限公司" [ref=f3e587] [cursor=pointer]:
+                - /url: /id6358686.html
+                - img "河北宇龙传动轴有限公司" [ref=f3e588]
+              - link "河北宇龙传动轴有限公司" [ref=f3e589] [cursor=pointer]:
+                - /url: /id6358686.html
+                - generic [ref=f3e590]: 河北宇龙传动轴有限公司
+            - generic [ref=f3e599]:
+              - link "安平县昊昌丝网制造有限公司" [ref=f3e600] [cursor=pointer]:
+                - /url: /id6058686.html
+                - img "安平县昊昌丝网制造有限公司" [ref=f3e601]
+              - link "安平县昊昌丝网制造有限公司" [ref=f3e602] [cursor=pointer]:
+                - /url: /id6058686.html
+                - generic [ref=f3e603]: 安平县昊昌丝网制造有限公司
+            - generic [ref=f3e612]:
+              - link "河北英凯模金属网有限公司" [ref=f3e613] [cursor=pointer]:
+                - /url: /id6548686.html
+                - img "河北英凯模金属网有限公司" [ref=f3e614]
+              - link "河北英凯模金属网有限公司" [ref=f3e615] [cursor=pointer]:
+                - /url: /id6548686.html
+                - generic [ref=f3e616]: 河北英凯模金属网有限公司
+            - generic [ref=f3e625]:
+              - link "安平县荣泰金属网栏有限公司" [ref=f3e626] [cursor=pointer]:
+                - /url: /id6728686.html
+                - img "安平县荣泰金属网栏有限公司" [ref=f3e627]
+              - link "安平县荣泰金属网栏有限公司" [ref=f3e628] [cursor=pointer]:
+                - /url: /id6728686.html
+                - generic [ref=f3e629]: 安平县荣泰金属网栏有限公司
+          - generic [ref=f3e631]:
+            - generic [ref=f3e636]:
+              - link "河北安平县永盛丝网制造有限公司" [ref=f3e637] [cursor=pointer]:
+                - /url: /id6819686.html
+                - img "河北安平县永盛丝网制造有限公司" [ref=f3e638]
+              - link "河北安平县永盛丝网制造有限公司" [ref=f3e639] [cursor=pointer]:
+                - /url: /id6819686.html
+                - generic [ref=f3e640]: 河北安平县永盛丝网制造有限公司
+            - generic [ref=f3e649]:
+              - link "河北金标建材科技股份有限公司" [ref=f3e650] [cursor=pointer]:
+                - /url: /id6109686.html
+                - img "河北金标建材科技股份有限公司" [ref=f3e651]
+              - link "河北金标建材科技股份有限公司" [ref=f3e652] [cursor=pointer]:
+                - /url: /id6109686.html
+                - generic [ref=f3e653]: 河北金标建材科技股份有限公司
+            - generic [ref=f3e662]:
+              - link "河北程杰汽车转向机制造有限公司" [ref=f3e663] [cursor=pointer]:
+                - /url: /id6689686.html
+                - img "河北程杰汽车转向机制造有限公司" [ref=f3e664]
+              - link "河北程杰汽车转向机制造有限公司" [ref=f3e665] [cursor=pointer]:
+                - /url: /id6689686.html
+                - generic [ref=f3e666]: 河北程杰汽车转向机制造有限公司
+            - generic [ref=f3e675]:
+              - link "安平县德明金属网业有限公司" [ref=f3e676] [cursor=pointer]:
+                - /url: /id6189686.html
+                - img "安平县德明金属网业有限公司" [ref=f3e677]
+              - link "安平县德明金属网业有限公司" [ref=f3e678] [cursor=pointer]:
+                - /url: /id6189686.html
+                - generic [ref=f3e679]: 安平县德明金属网业有限公司
+            - generic [ref=f3e688]:
+              - link "河北麦萨食品机械有限公司" [ref=f3e689] [cursor=pointer]:
+                - /url: /id6268686.html
+                - img "河北麦萨食品机械有限公司" [ref=f3e690]
+              - link "河北麦萨食品机械有限公司" [ref=f3e691] [cursor=pointer]:
+                - /url: /id6268686.html
+                - generic [ref=f3e692]: 河北麦萨食品机械有限公司
+            - generic [ref=f3e701]:
+              - link "河北裕丰京安养殖有限公司" [ref=f3e702] [cursor=pointer]:
+                - /url: /id6258686.html
+                - img "河北裕丰京安养殖有限公司" [ref=f3e703]
+              - link "河北裕丰京安养殖有限公司" [ref=f3e704] [cursor=pointer]:
+                - /url: /id6258686.html
+                - generic [ref=f3e705]: 河北裕丰京安养殖有限公司
+            - generic [ref=f3e714]:
+              - link "安平县浩源养殖有限公司" [ref=f3e715] [cursor=pointer]:
+                - /url: /id6958686.html
+                - img "安平县浩源养殖有限公司" [ref=f3e716]
+              - link "安平县浩源养殖有限公司" [ref=f3e717] [cursor=pointer]:
+                - /url: /id6958686.html
+                - generic [ref=f3e718]: 安平县浩源养殖有限公司
+            - generic [ref=f3e727]:
+              - link "安平县天泽金属制品有限公司" [ref=f3e728] [cursor=pointer]:
+                - /url: /id6148686.html
+                - img "安平县天泽金属制品有限公司" [ref=f3e729]
+              - link "安平县天泽金属制品有限公司" [ref=f3e730] [cursor=pointer]:
+                - /url: /id6148686.html
+                - generic [ref=f3e731]: 安平县天泽金属制品有限公司
+            - generic [ref=f3e740]:
+              - link "安平金龙车辆装备有限公司" [ref=f3e741] [cursor=pointer]:
+                - /url: /id6028686.html
+                - img "安平金龙车辆装备有限公司" [ref=f3e742]
+              - link "安平金龙车辆装备有限公司" [ref=f3e743] [cursor=pointer]:
+                - /url: /id6028686.html
+                - generic [ref=f3e744]: 安平金龙车辆装备有限公司
+    - heading "技能展示" [level=2] [ref=f3e756]
+    - generic [ref=f3e767]:
+      - generic [ref=f3e768]:
+        - img "技能展示3" [ref=f3e771]
+        - generic [ref=f3e772]: 金属丝拉力试验操作
+      - generic [ref=f3e773]:
+        - img "技能展示" [ref=f3e776]
+        - generic [ref=f3e777]: ICP电脑操作测量
+      - generic [ref=f3e778]:
+        - img "技能展示5" [ref=f3e781]
+        - generic [ref=f3e782]: 配制化学试剂
+      - generic [ref=f3e783]:
+        - img "技能展示4" [ref=f3e786]
+        - generic [ref=f3e787]: 直读光谱测化学成分
+      - generic [ref=f3e788]:
+        - img "技能展示6" [ref=f3e791]
+        - generic [ref=f3e792]: 直读光谱电脑操作
+      - generic [ref=f3e793]:
+        - img "技能展示1" [ref=f3e796]
+        - generic [ref=f3e797]: ICP测定化学成分
+      - generic [ref=f3e798]:
+        - img "技能展示2" [ref=f3e801]
+        - generic [ref=f3e802]: 直读光谱测定化学成分
+      - generic [ref=f3e803]:
+        - img "电能表检定" [ref=f3e806]
+        - generic [ref=f3e807]: 电能表检定
+      - generic [ref=f3e808]:
+        - img "煤发热量的检测" [ref=f3e811]
+        - generic [ref=f3e812]: 煤发热量的检测
+      - generic [ref=f3e813]:
+        - img "煤的冷压强度" [ref=f3e816]
+        - generic [ref=f3e817]: 煤的冷压强度
+      - generic [ref=f3e818]:
+        - img "煤炭样品的制备过程" [ref=f3e821]
+        - generic [ref=f3e822]: 煤炭样品的制备过程
+      - generic [ref=f3e823]:
+        - img "煤中水分，灰分，挥发分的检测" [ref=f3e826]
+        - generic [ref=f3e827]: 煤中水分，灰分，挥发分的检测
+      - generic [ref=f3e828]:
+        - img "燃气表检定" [ref=f3e831]
+        - generic [ref=f3e832]: 燃气表检定
+      - generic [ref=f3e833]:
+        - img "压力表检定" [ref=f3e836]
+        - generic [ref=f3e837]: 压力表检定
+      - generic [ref=f3e838]:
+        - img "煤中硫含量的检测" [ref=f3e841]
+        - generic [ref=f3e842]: 煤中硫含量的检测
+  - generic [ref=f3e846]:
+    - generic [ref=f3e853]:
+      - generic [ref=f3e855]: 首页
+      - paragraph [ref=f3e857]:
+        - link "首页" [ref=f3e858] [cursor=pointer]:
+          - /url: /
+        - text: "|"
+        - link "综检中心简介" [ref=f3e859] [cursor=pointer]:
+          - /url: /zhijiansuojianjie.html
+        - text: "|"
+        - link "综检中心检测设备" [ref=f3e860] [cursor=pointer]:
+          - /url: /zhijiansuojianceshebei.html
+        - text: "|"
+        - link "综检中心人员" [ref=f3e861] [cursor=pointer]:
+          - /url: /zhijiansuorenyuan.html
+        - text: "|"
+        - link "综检中心资质" [ref=f3e862] [cursor=pointer]:
+          - /url: /zhijiansuozizhi.html
+        - text: "|"
+        - link "综检中心资讯" [ref=f3e863] [cursor=pointer]:
+          - /url: /zhijianzixun.html
+        - text: "|"
+        - link "政策法规" [ref=f3e864] [cursor=pointer]:
+          - /url: /zhengcefagui.html
+        - text: "|"
+        - link "联系我们" [ref=f3e865] [cursor=pointer]:
+          - /url: /contactus.html
+        - text: "|"
+        - link "网站地图" [ref=f3e866] [cursor=pointer]:
+          - /url: /sitemap.html
+    - generic [ref=f3e872]:
+      - generic [ref=f3e878]:
+        - text: 主办单位：河北省丝网产品安平县综合检验检测中心
+        - text: 地址：安平县正港路南经五路东59-1号 联系电话：0318-7533315
+        - text: 邮编：053600 邮箱：
+        - link "sw12365@126.com" [ref=f3e879] [cursor=pointer]:
+          - /url: mailto:sw12365@126.com
+        - text: 技术支持 [
+        - link "融创传媒" [ref=f3e880] [cursor=pointer]:
+          - /url: http://rongchuangmedia.net
+        - text: "]"
+        - link "冀ICP备13023258号" [ref=f3e881] [cursor=pointer]:
+          - /url: https://beian.miit.gov.cn/
+          - generic [ref=f3e882]: 冀ICP备13023258号
+      - generic [ref=f3e889]:
+        - generic "安平县综合检验检测中心公众号" [ref=f3e890]:
+          - img "安平县综合检验检测中心公众号" [ref=f3e891]
+        - generic [ref=f3e893]: 安平县综合检验检测中心公众号

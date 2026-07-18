@@ -1,0 +1,136 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e4]:
+      - link "河北省丝网产品质量监督检验中心" [ref=e6] [cursor=pointer]:
+        - /url: /html/web/
+        - img "河北省丝网产品质量监督检验中心" [ref=e7]
+      - generic [ref=e8]:
+        - generic [ref=e9]:
+          - img "联系电话" [ref=e10]
+          - generic [ref=e11]: 0318-7533315
+        - generic [ref=e12]:
+          - text: 科学
+          - emphasis [ref=e13]: 公正
+          - text: 廉洁
+          - emphasis [ref=e14]: 高效
+    - navigation "主导航" [ref=e17]:
+      - list [ref=e18]:
+        - listitem [ref=e19]:
+          - link "首页" [ref=e20] [cursor=pointer]:
+            - /url: /html/web/
+        - listitem [ref=e21]:
+          - link "关于我们" [ref=e22] [cursor=pointer]:
+            - /url: /html/web/cat_about/index.html
+        - listitem [ref=e23]:
+          - link "检定项目" [ref=e24] [cursor=pointer]:
+            - /url: /html/web/cat_check/index.html
+        - listitem [ref=e25]:
+          - link "检测设备" [ref=e26] [cursor=pointer]:
+            - /url: /html/web/cat_equip/index.html
+        - listitem [ref=e27]:
+          - link "政策法规" [ref=e28] [cursor=pointer]:
+            - /url: /html/web/cat_policy/index.html
+        - listitem [ref=e29]:
+          - link "在线委托" [ref=e30] [cursor=pointer]:
+            - /url: /html/web/cat_entrust/index.html
+        - listitem [ref=e31]:
+          - link "资讯中心" [ref=e32] [cursor=pointer]:
+            - /url: /html/web/cat_news/index.html
+        - listitem [ref=e33]:
+          - link "联系我们" [ref=e34] [cursor=pointer]:
+            - /url: /html/web/cat_contact/index.html
+  - generic [ref=e36]:
+    - heading "关于我们" [level=1] [ref=e37]
+    - generic [ref=e38]: 机构简介、资质荣誉、能力验证、技术团队
+  - generic [ref=e40]:
+    - link "首页" [ref=e41] [cursor=pointer]:
+      - /url: /html/web/
+    - text: / 关于我们
+  - generic [ref=e43]:
+    - complementary [ref=e44]:
+      - generic [ref=e45]: 关于我们
+      - list [ref=e46]:
+        - listitem [ref=e47]:
+          - link "机构简介" [ref=e48] [cursor=pointer]:
+            - /url: /html/web/cat_about_js/index.html
+        - listitem [ref=e49]:
+          - link "资质荣誉" [ref=e50] [cursor=pointer]:
+            - /url: /html/web/cat_about_zz/index.html
+        - listitem [ref=e51]:
+          - link "能力验证" [ref=e52] [cursor=pointer]:
+            - /url: /html/web/cat_about_nl/index.html
+        - listitem [ref=e53]:
+          - link "技术团队" [ref=e54] [cursor=pointer]:
+            - /url: /html/web/cat_about_td/index.html
+      - generic [ref=e55]:
+        - strong [ref=e56]: 栏目说明
+        - text: 关于我们
+        - paragraph [ref=e57]: 父栏目封面页，点击右侧卡片或左侧导航进入子栏目。
+    - main [ref=e58]:
+      - article [ref=e59]:
+        - generic [ref=e60]:
+          - generic [ref=e61]:
+            - heading "关于我们" [level=2] [ref=e62]
+            - paragraph [ref=e63]: 本栏目汇集机构简介、资质荣誉、能力验证、技术团队等内容，点击下方卡片进入对应子栏目。
+          - generic [ref=e64]: 栏目导航
+        - generic [ref=e65]:
+          - link "机构简介 查看详情 " [ref=e66] [cursor=pointer]:
+            - /url: /html/web/cat_about_js/index.html
+            - generic [ref=e67]: 机构简介
+            - generic [ref=e69]:
+              - text: 查看详情
+              - generic [ref=e70]: 
+          - link "资质荣誉 查看详情 " [ref=e71] [cursor=pointer]:
+            - /url: /html/web/cat_about_zz/index.html
+            - generic [ref=e72]: 资质荣誉
+            - generic [ref=e74]:
+              - text: 查看详情
+              - generic [ref=e75]: 
+          - link "能力验证 查看详情 " [ref=e76] [cursor=pointer]:
+            - /url: /html/web/cat_about_nl/index.html
+            - generic [ref=e77]: 能力验证
+            - generic [ref=e79]:
+              - text: 查看详情
+              - generic [ref=e80]: 
+          - link "技术团队 查看详情 " [ref=e81] [cursor=pointer]:
+            - /url: /html/web/cat_about_td/index.html
+            - generic [ref=e82]: 技术团队
+            - generic [ref=e84]:
+              - text: 查看详情
+              - generic [ref=e85]: 
+  - generic [ref=e87]:
+    - link "首页" [ref=e88] [cursor=pointer]:
+      - /url: /html/web/
+    - link "综检中心简介" [ref=e89] [cursor=pointer]:
+      - /url: /html/web/cat_about_js/index.html
+    - link "综检中心检测设备" [ref=e90] [cursor=pointer]:
+      - /url: /html/web/cat_equip/index.html
+    - link "综检中心人员" [ref=e91] [cursor=pointer]:
+      - /url: /html/web/cat_about_td/index.html
+    - link "综检中心资质" [ref=e92] [cursor=pointer]:
+      - /url: /html/web/cat_about_zz/index.html
+    - link "综检中心资讯" [ref=e93] [cursor=pointer]:
+      - /url: /html/web/cat_news_quality/index.html
+    - link "政策法规" [ref=e94] [cursor=pointer]:
+      - /url: /html/web/cat_policy/index.html
+    - link "联系我们" [ref=e95] [cursor=pointer]:
+      - /url: /html/web/cat_contact/index.html
+  - contentinfo [ref=e96]:
+    - generic [ref=e97]:
+      - generic [ref=e98]:
+        - generic [ref=e99]: 主办单位：河北省丝网产品安平县综合检验检测中心
+        - generic [ref=e100]: 地址：安平县正港路南经五路东59-1号 联系电话：0318-7533315
+        - generic [ref=e101]:
+          - text: 邮编：053600 邮箱：
+          - link "sw12365@126.com" [ref=e102] [cursor=pointer]:
+            - /url: mailto:sw12365@126.com
+        - generic [ref=e103]:
+          - text: 技术支持：[
+          - link "融创传媒" [ref=e104] [cursor=pointer]:
+            - /url: http://rongchuangmedia.net/
+          - text: "]"
+          - link "冀ICP备13023258号" [ref=e105] [cursor=pointer]:
+            - /url: https://beian.miit.gov.cn/
+      - generic [ref=e106]:
+        - img "安平县综合检验检测中心公众号" [ref=e107]
+        - generic [ref=e108]: 安平县综合检验检测中心公众号
