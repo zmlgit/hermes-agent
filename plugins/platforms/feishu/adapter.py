@@ -4761,26 +4761,27 @@ class FeishuAdapter(BasePlatformAdapter):
     # Outbound payload construction and send pipeline
     # =========================================================================
 
-def _build_outbound_payload(self, content: str, *, prefer_post: bool = False) -> tuple[str, str]:
-    if FeishuAdapter._peer_bot_mentions:
-        converted = self._try_mention_post(content)
-        if converted:
-            return converted
-    # Empirically (issue #52786), current Feishu clients render markdown
-    # tables inside ``post``-type ``md`` elements natively. The previous
-    # table-downgrade branch forced any table-containing message to
-    # ``text``, which left Feishu readers seeing the raw pipe-and-dash
-    # source instead of a rendered table. Trust the common markdown path
-    # for table content too.
-    #
-    # ``prefer_post`` lets ``send`` treat the chunk as part of a larger
-    # markdown document: when a long markdown reply is split at
-    # MAX_MESSAGE_LENGTH, the per-chunk regex would otherwise
-    # mis-classify a plain-prose chunk as ``text``. See #26841.
-    if prefer_post or _MARKDOWN_HINT_RE.search(content):
-        return "post", _build_markdown_post_payload(content)
-    text_payload = {"text": content}
-    return "text", json.dumps(text_payload, ensure_ascii=False)
+    def _build_outbound_payload(self, content: str, *, prefer_post: bool = False) -> tuple[str, str]:
+        if FeishuAdapter._peer_bot_mentions:
+            converted = self._try_mention_post(content)
+            if converted:
+                return converted
+        # Empirically (issue #52786), current Feishu clients render markdown
+        # tables inside ``post``-type ``md`` elements natively. The previous
+        # table-downgrade branch forced any table-containing message to
+        # ``text``, which left Feishu readers seeing the raw pipe-and-dash
+        # source instead of a rendered table. Trust the common markdown path
+        # for table content too.
+        #
+        # ``prefer_post`` lets ``send`` treat the chunk as part of a larger
+        # markdown document: when a long markdown reply is split at
+        # MAX_MESSAGE_LENGTH, the per-chunk regex would otherwise
+        # mis-classify a plain-prose chunk as ``text``. See #26841.
+        if prefer_post or _MARKDOWN_HINT_RE.search(content):
+            return "post", _build_markdown_post_payload(content)
+        text_payload = {"text": content}
+        return "text", json.dumps(text_payload, ensure_ascii=False)
+
     _MENTION_RE = re.compile(r'@([A-Za-z][A-Za-z0-9_\u4e00-\u9fff]+)')
 
     def _try_mention_post(self, content: str) -> Optional[tuple[str, str]]:
