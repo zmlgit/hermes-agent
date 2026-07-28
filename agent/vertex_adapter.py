@@ -67,10 +67,7 @@ def _resolve_region(explicit: Optional[str] = None) -> str:
     """Region precedence: explicit arg > VERTEX_REGION env > config.yaml > default."""
     if explicit:
         return explicit
-    try:
-        env_region = (_get_secret("VERTEX_REGION") or "").strip()
-    except UnscopedSecretError:
-        env_region = (os.environ.get("VERTEX_REGION") or "").strip()
+    env_region = (_get_secret("VERTEX_REGION") or "").strip()
     if env_region:
         return env_region
     cfg_region = str(_vertex_config().get("region") or "").strip()
@@ -83,10 +80,7 @@ def _resolve_project_override() -> Optional[str]:
     Returns None when neither is set (the credentials' embedded project_id
     is used in that case).
     """
-    try:
-        env_project = (_get_secret("VERTEX_PROJECT_ID") or "").strip()
-    except UnscopedSecretError:
-        env_project = (os.environ.get("VERTEX_PROJECT_ID") or "").strip()
+    env_project = (_get_secret("VERTEX_PROJECT_ID") or "").strip()
     if env_project:
         return env_project
     cfg_project = str(_vertex_config().get("project_id") or "").strip()
@@ -103,10 +97,7 @@ def _resolve_credentials_path(explicit: Optional[str]) -> Optional[str]:
     # profile mint Vertex tokens from — and get billed against — a different
     # profile's service-account file. See agent/secret_scope.py.
     for env_var in ("VERTEX_CREDENTIALS_PATH", "GOOGLE_APPLICATION_CREDENTIALS"):
-        try:
-            path = _get_secret(env_var)
-        except UnscopedSecretError:
-            path = os.environ.get(env_var)
+        path = _get_secret(env_var)
         if path and os.path.exists(path):
             return path
     return None
