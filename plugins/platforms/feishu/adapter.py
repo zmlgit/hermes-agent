@@ -1437,14 +1437,11 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
                 msg = await self._conn.recv()
                 _loop.create_task(self._handle_message(msg))
         except Exception as e:
-            # ponytail: ConnectionClosedOK (code 1000) is a normal WS close —
-            # keepalive timeout or server-side rotation. The SDK's _auto_reconnect
-            # flag is unreliable here (adapter shutdown sets it to False, but
-            # mid-flight closes see whatever value was last set). The patched
-            # loop is the adapter's reconnect authority since we monkey-patched
-            # the SDK's loop out, so ALWAYS attempt reconnect here. Without this,
-            # the task silently dies (asyncio "Task exception was never retrieved")
-            # and the gateway serves 0 inbound feishu messages until restarted.
+            # ponytail: gate on _auto_reconnect so shutdown (which calls
+            # _disable_websocket_auto_reconnect -> _auto_reconnect = False)
+            # cannot race the receive loop's handler and resuscitate a dead
+            # connection we just closed. Same rig as _patched_start uses on a
+            # connect failure fired from the same lifecycle (line ~1484).
             is_clean_close = "ConnectionClosed" in type(e).__name__
             log_fn = (
                 ws_client_module.logger.info if is_clean_close
@@ -1457,6 +1454,11 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
                 ws_client_module.logger.warning(
                     self._fmt_log("disconnect after receive loop exit failed: {}", disconnect_err),
                 )
+            if not self._auto_reconnect:
+                ws_client_module.logger.info(
+                    self._fmt_log("auto_reconnect disabled, receive loop exiting (shutdown)")
+                )
+                return
             try:
                 await self._reconnect()
             except Exception as reconnect_err:

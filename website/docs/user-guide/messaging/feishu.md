@@ -488,6 +488,31 @@ platforms:
 | Reconnect interval | `ws_reconnect_interval` | 120s | How long to wait between reconnection attempts |
 | Ping interval | `ws_ping_interval` | _(SDK default)_ | Frequency of WebSocket keepalive pings |
 
+## Multiple Feishu Apps in One Gateway (Multiplex)
+
+When you run `hermes gateway` with [`multiplex_profiles`](../configuration.md#multiplex_profiles), each profile can declare its own Feishu app — enabling "panel of experts" group chats where each bot answers as a separate persona.
+
+Each secondary profile declares its Feishu credentials in per-profile YAML (not in `.env`, since secrets there are global):
+
+```yaml
+# ~/.hermes/profiles/<name>/config.yaml
+feishu:
+  app_id: "cli_secondary_app_id"
+  app_secret: "secret_for_secondary"
+  encrypt_key: "enc"
+  verification_token: "tok"
+  domain: "feishu"
+  connection_mode: "websocket"
+  extra:
+    default_group_policy: "open"
+```
+
+The default profile keeps using `FEISHU_APP_ID` / `FEISHU_APP_SECRET` from `.env` as before. Secondary profiles are seeded entirely from per-profile YAML so their credentials never leak into the global environment.
+
+Each profile's WebSocket client gets its own isolated event loop (`_hermes_loop`), so N feishu WS clients can coexist in one process without tripping `Task got Future attached to a different loop`.
+
+During shutdown, the adapter flips `_auto_reconnect = False` on each client before closing its connection, so the receive loop's exception handler doesn't try to resuscitate a connection the gateway is actively tearing down.
+
 ## Per-Group Access Control
 
 Beyond the global `FEISHU_GROUP_POLICY`, you can set fine-grained rules per group chat using `group_rules` in config.yaml:
