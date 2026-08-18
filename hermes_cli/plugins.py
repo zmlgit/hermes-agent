@@ -379,6 +379,11 @@ VALID_HOOKS: Set[str] = {
     #   alias_used: the exact token the user typed (str), args_raw: str,
     #   session_key: str | None (gateway), platform: str | None (gateway).
     "pre_command",
+    # Local compatibility shim for the kanban-workflow plugin in
+    # ~/.hermes/plugins, which still registers the pre-upstream hook name.
+    # The hook has no core fire-site, so this is inert but keeps registration
+    # from producing an unknown-hook warning on every startup.
+    "kanban_task_failed",
 }
 
 # Hooks whose return value carries a directive that the shell-hook response
