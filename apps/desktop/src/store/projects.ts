@@ -372,6 +372,12 @@ async function gatewayRequestOn<T>(
   return gateway.request<T>(method, params)
 }
 
+function isRetryableProjectTreeReadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+
+  return message.includes('request timed out') || message.includes('gateway connection closed')
+}
+
 interface ActiveProjectsContext {
   gateway: HermesGateway
   profile: string
@@ -416,6 +422,7 @@ export async function refreshProjects(): Promise<void> {
 
   try {
     context = await activeProjectsContext()
+
     const payload = await gatewayRequestOn<ProjectsPayload>(
       context.gateway,
       'projects.list',
@@ -478,11 +485,29 @@ async function refreshProjectTreeOn(context: ActiveProjectsContext): Promise<voi
   }
 
   try {
-    const res = await gatewayRequestOn<ProjectTreePayload>(
-      gateway,
-      'projects.tree',
-      projectParams({ preview_limit: PROJECT_TREE_PREVIEW_LIMIT }, profile)
-    )
+    let res: ProjectTreePayload
+
+    try {
+      res = await gatewayRequestOn<ProjectTreePayload>(
+        gateway,
+        'projects.tree',
+        projectParams({ preview_limit: PROJECT_TREE_PREVIEW_LIMIT }, profile)
+      )
+    } catch (error) {
+      // A remote source switch can leave the first read RPC on a newly-opened
+      // socket without a response even though the gateway remains healthy.
+      // Retry once only while this exact gateway/profile is still foreground;
+      // missing-method and other authoritative failures stay visible as-is.
+      if (!isRetryableProjectTreeReadError(error) || !stillOnProjectsContext(context)) {
+        throw error
+      }
+
+      res = await gatewayRequestOn<ProjectTreePayload>(
+        gateway,
+        'projects.tree',
+        projectParams({ preview_limit: PROJECT_TREE_PREVIEW_LIMIT }, profile)
+      )
+    }
 
     if (generation !== projectTreeRefreshGeneration || !stillOnProjectsContext(context)) {
       return
@@ -559,6 +584,7 @@ export async function fetchProjectSessions(projectId: string): Promise<SidebarPr
 
   try {
     const context = await activeProjectsContext()
+
     const res = await gatewayRequestOn<{ project: SidebarProjectTree | null }>(
       context.gateway,
       'projects.project_sessions',
@@ -672,6 +698,7 @@ export async function scanAndRecordRepos(force = false): Promise<void> {
     // the merged session-derived + scanned list.
     try {
       const context = await activeProjectsContext()
+
       const discovered = await gatewayRequestOn<{
         repos?: unknown
         discovery_policy?: unknown
@@ -684,6 +711,7 @@ export async function scanAndRecordRepos(force = false): Promise<void> {
       // being blanked back to the silent, unpopulated state of #81723.
       if (discovered?.repos === undefined) {
         markProjectsRpcFailure(new Error('projects.discover_repos returned no repo list'))
+
         return
       }
 
@@ -700,6 +728,7 @@ export async function scanAndRecordRepos(force = false): Promise<void> {
       // let the sidebar show the error/absent state.
       markProjectsRpcFailure(err)
     }
+
     return
   }
 
@@ -763,6 +792,7 @@ export async function scanAndRecordRepos(force = false): Promise<void> {
     }
 
     state.completedSignature = signature
+
     // Completion refresh only when the focused profile still matches the one
     // the scan was captured under. refreshProjectTree() re-derives the current
     // context, so skipping on mismatch keeps a stale scan from publishing into
