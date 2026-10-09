@@ -56,6 +56,28 @@ def source_git_env() -> dict[str, str]:
 _GIT_TEXT_KW = {"text": True, "encoding": "utf-8", "errors": "replace"}
 
 
+def _git_probe_timeout() -> int:
+    """Timeout (seconds) for the passive update check's network git probes.
+
+    The check runs on a background daemon thread, so a generous ceiling is
+    safe. 5-10s is not enough on high-latency links to GitHub (e.g. behind
+    the GFW or a slow VPN), where the TLS handshake plus ref advertisement
+    can routinely take 20-40s — users on such links saw the desktop "Check
+    for updates" permanently report failure while `hermes update` itself
+    worked fine. Override with HERMES_UPDATE_GIT_TIMEOUT (positive integer,
+    seconds). (Carried from fork fix/update-check-git-timeout, PR #90638.)
+    """
+    raw = os.environ.get("HERMES_UPDATE_GIT_TIMEOUT", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return 30
+
+
 def _git_run(args: list[str], *, cwd: Optional[Path] = None, timeout: int = 5, text: bool = True,
              git: str = "git"):
     """Read Git state without prompts, optional index writes, or inherited targeting."""
@@ -159,7 +181,7 @@ def _branch_tip(repository: str | None, branch: str, root: Path, git: str,
         if branch == "main" and remote == "origin":
             return None, False, failure
     result = _git_run(["ls-remote", "--exit-code", "--heads", remote, f"refs/heads/{branch}"],
-                      cwd=root, git=git, timeout=10)
+                      cwd=root, git=git, timeout=_git_probe_timeout())
     if result is None:
         return None, False, failure or f"`git ls-remote {remote}` could not run."
     sha = result.stdout.split()[0] if result.returncode == 0 and result.stdout else None
